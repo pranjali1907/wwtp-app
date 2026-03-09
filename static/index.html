@@ -1,0 +1,1608 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WWTP Simulation & Neural Prediction System</title>
+    <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1e3a8a 0%, #0f172a 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: #1e3a8a;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            margin-bottom: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 15px;
+        }
+
+        .header-icon {
+            width: 40px;
+            height: 40px;
+            background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.1); opacity: 0.8; }
+        }
+
+        .card {
+            background: white;
+            border-radius: 20px;
+            padding: 30px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+        }
+
+        .card-header {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            margin-bottom: 25px;
+            padding-bottom: 15px;
+            border-bottom: 3px solid #1e3a8a;
+        }
+
+        .card-icon {
+            font-size: 1.5rem;
+        }
+
+        .card h2 {
+            font-size: 1.5rem;
+            color: #1e3a8a;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #374151;
+        }
+
+        select, input[type="number"], input[type="date"] {
+            width: 100%;
+            padding: 12px 15px;
+            border: 2px solid #e5e7eb;
+            border-radius: 10px;
+            font-size: 1rem;
+            transition: all 0.3s;
+        }
+
+        select:focus, input:focus {
+            outline: none;
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+        }
+
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 10px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            margin: 5px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #3b82f6, #1e40af);
+            color: white;
+        }
+
+        .btn-secondary {
+            background: #6b7280;
+            color: white;
+        }
+
+        .btn-success {
+            background: #10b981;
+            color: white;
+        }
+
+        .btn-warning {
+            background: #f59e0b;
+            color: white;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(0,0,0,0.2);
+        }
+
+        .btn-group {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .parameter-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+            gap: 15px;
+        }
+
+        .parameter-item {
+            background: #f3f4f6;
+            padding: 15px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .parameter-item input[type="checkbox"] {
+            width: 20px;
+            height: 20px;
+            cursor: pointer;
+        }
+
+        .parameter-item input[type="number"] {
+            flex: 1;
+            min-width: 80px;
+        }
+
+        .network-config {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .config-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 25px;
+            border-radius: 15px;
+            text-align: center;
+            transition: transform 0.3s;
+        }
+
+        .config-card:hover {
+            transform: scale(1.02);
+        }
+
+        .config-card h3 {
+            font-size: 1rem;
+            margin-bottom: 10px;
+            opacity: 0.9;
+        }
+
+        .config-card .number {
+            font-size: 3rem;
+            font-weight: bold;
+        }
+
+        .config-card input[type="number"] {
+            background: rgba(255,255,255,0.2);
+            border: 2px solid rgba(255,255,255,0.3);
+            color: white;
+            text-align: center;
+            font-size: 2rem;
+            font-weight: bold;
+            width: 100px;
+            margin-top: 10px;
+        }
+
+        .config-card input[type="number"]::placeholder {
+            color: rgba(255,255,255,0.7);
+        }
+
+        /* MATLAB-style Neural Network Visualization */
+        .matlab-network-container {
+            background: #e8e8e8;
+            border: 2px solid #999;
+            border-radius: 4px;
+            padding: 20px;
+            margin-top: 20px;
+            font-family: 'Segoe UI', Tahoma, sans-serif;
+            box-shadow: inset 0 0 10px rgba(0,0,0,0.1);
+        }
+
+        .matlab-title-bar {
+            background: linear-gradient(180deg, #e0e0e0 0%, #c0c0c0 100%);
+            border: 1px solid #999;
+            border-radius: 3px;
+            padding: 8px 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 15px;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+        }
+
+        .matlab-icon {
+            width: 16px;
+            height: 16px;
+            background: linear-gradient(135deg, #ff6b35, #f7931e);
+            border-radius: 2px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            color: white;
+            font-weight: bold;
+        }
+
+        .matlab-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .network-diagram {
+            background: #f5f5f5;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            padding: 30px;
+            position: relative;
+            min-height: 300px;
+            overflow-x: auto;
+        }
+
+        .layer-container {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 40px;
+            min-width: 700px;
+            position: relative;
+        }
+
+        .layer-box {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .layer-label {
+            font-size: 14px;
+            font-weight: bold;
+            color: #333;
+            text-transform: uppercase;
+        }
+
+        .neuron-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .matlab-neuron {
+            width: 50px;
+            height: 50px;
+            border: 2px solid #666;
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            font-weight: bold;
+            color: white;
+            position: relative;
+            box-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }
+
+        .input-neuron {
+            background: linear-gradient(135deg, #90EE90, #7FCD7F);
+            border-color: #228B22;
+        }
+
+        .hidden-neuron {
+            background: linear-gradient(135deg, #87CEEB, #6BB6D6);
+            border-color: #4682B4;
+            width: 80px;
+            height: 60px;
+            flex-direction: column;
+            gap: 2px;
+        }
+
+        .output-neuron {
+            background: linear-gradient(135deg, #DDA0DD, #C585C5);
+            border-color: #8B008B;
+            width: 80px;
+            height: 60px;
+            flex-direction: column;
+            gap: 2px;
+        }
+
+        .neuron-content {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 2px;
+        }
+
+        .weight-box {
+            width: 20px;
+            height: 12px;
+            background: #fff;
+            border: 1px solid #666;
+            font-size: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #333;
+        }
+
+        .bias-box {
+            width: 20px;
+            height: 12px;
+            background: #fff;
+            border: 1px solid #666;
+            font-size: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #333;
+        }
+
+        .func-symbol {
+            font-size: 20px;
+            color: #333;
+        }
+
+        .connection-line {
+            position: absolute;
+            height: 2px;
+            background: #666;
+            top: 50%;
+            transform: translateY(-50%);
+        }
+
+        .layer-connector {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            position: relative;
+        }
+
+        .connector-dot {
+            width: 8px;
+            height: 8px;
+            background: #666;
+            border-radius: 50%;
+        }
+
+        .connector-line-h {
+            width: 30px;
+            height: 2px;
+            background: #666;
+        }
+
+        .connector-line-v {
+            width: 2px;
+            height: 30px;
+            background: #666;
+        }
+
+        .arrow-right {
+            width: 0;
+            height: 0;
+            border-top: 5px solid transparent;
+            border-bottom: 5px solid transparent;
+            border-left: 8px solid #666;
+        }
+
+        .node-count {
+            font-size: 12px;
+            color: #666;
+            font-weight: bold;
+            margin-top: 5px;
+        }
+
+        .hidden-detail {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 3px;
+            background: rgba(255,255,255,0.3);
+            padding: 4px;
+            border-radius: 3px;
+        }
+
+        .math-symbol {
+            font-size: 16px;
+            color: #333;
+            font-weight: bold;
+        }
+
+        .upload-zone {
+            border: 3px dashed #cbd5e1;
+            border-radius: 15px;
+            padding: 40px;
+            text-align: center;
+            background: #f8fafc;
+            transition: all 0.3s;
+            cursor: pointer;
+        }
+
+        .upload-zone:hover, .upload-zone.dragover {
+            border-color: #3b82f6;
+            background: #eff6ff;
+        }
+
+        .upload-icon {
+            font-size: 3rem;
+            color: #94a3b8;
+            margin-bottom: 15px;
+        }
+
+        .prediction-horizon {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        .date-display {
+            background: #eff6ff;
+            padding: 15px;
+            border-radius: 10px;
+            border-left: 4px solid #3b82f6;
+        }
+
+        .action-buttons {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .status-bar {
+            background: #f0fdf4;
+            border: 1px solid #86efac;
+            border-radius: 10px;
+            padding: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-top: 20px;
+        }
+
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            background: #22c55e;
+            border-radius: 50%;
+            animation: blink 2s infinite;
+        }
+
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .output-section {
+            background: linear-gradient(135deg, #1e3a8a 0%, #0f172a 100%);
+            color: white;
+            border-radius: 20px;
+            padding: 30px;
+            margin-top: 20px;
+        }
+
+        .chart-container {
+            background: white;
+            border-radius: 15px;
+            padding: 20px;
+            height: 300px;
+            margin-top: 20px;
+            position: relative;
+        }
+
+        .metric-cards {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .metric-card {
+            background: rgba(255,255,255,0.1);
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+            backdrop-filter: blur(10px);
+        }
+
+        .metric-value {
+            font-size: 2rem;
+            font-weight: bold;
+            color: #60a5fa;
+        }
+
+        .metric-label {
+            font-size: 0.9rem;
+            color: #94a3b8;
+            margin-top: 5px;
+        }
+
+        @media (max-width: 768px) {
+            .network-config, .prediction-horizon, .action-buttons, .metric-cards {
+                grid-template-columns: 1fr;
+            }
+        }
+        @media (max-width: 1024px) {
+            .action-buttons {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <h1>
+                <div class="header-icon">⚡</div>
+                WWTP Simulation & Neural Prediction System
+            </h1>
+        </div>
+
+        <!-- Plant Type Selection -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-icon">🏭</span>
+                <h2>Select WWTP Type</h2>
+            </div>
+            <div class="form-group">
+                <select id="plantType" onchange="updateParameters()">
+                    <option value="">-- Select Plant Type --</option>
+                    <option value="asp">Activated Sludge Process (ASP)</option>
+                    <option value="mbr">Membrane Bioreactor (MBR)</option>
+                    <option value="sbr">Sequencing Batch Reactor (SBR)</option>
+                    <option value="mle">Modified Ludzack-Ettinger (MLE)</option>
+                    <option value="bardenpho">Bardenpho Process</option>
+                </select>
+            </div>
+            
+            <!-- Added Upload Zone Section -->
+            <div class="upload-zone" id="uploadZone" onclick="document.getElementById('fileInput').click()">
+                <div class="upload-icon">⬆️</div>
+                <h3>Drop Excel file here or click to upload</h3>
+                <p style="color: #6b7280; margin-top: 10px;">
+                    Supports .xlsx, .xls, .csv (MATLAB compatible)
+                </p>
+                <input type="file" id="fileInput" style="display: none;" accept=".xlsx,.xls,.csv" onchange="handleFileUpload(event)">
+            </div>
+        </div>
+
+        <!-- Input Parameters -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-icon">📊</span>
+                <h2>Input Parameters & Values</h2>
+            </div>
+            <div class="btn-group">
+                <button class="btn btn-secondary" onclick="loadDefaults()">LOAD DEFAULT VALUES</button>
+                <button class="btn btn-secondary" onclick="clearAll()">CLEAR ALL</button>
+                <button class="btn btn-secondary" onclick="randomizeData()">RANDOMIZE TEST DATA</button>
+            </div>
+            <p style="margin-bottom: 15px; color: #6b7280;">
+                Check to select parameter for modeling | Enter value for simulation
+            </p>
+            <div id="parameterContainer" class="parameter-grid">
+                <p style="color: #9ca3af; font-style: italic; grid-column: 1/-1;">
+                    Please select a plant type first...
+                </p>
+            </div>
+        </div>
+
+        <!-- Output Parameters -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-icon">📈</span>
+                <h2>Output Parameters</h2>
+            </div>
+            <p style="margin-bottom: 15px;">Select target output variables for prediction:</p>
+            <div id="outputContainer" style="color: #9ca3af; font-style: italic;">
+                Please select a plant type first...
+            </div>
+        </div>
+
+        <!-- Network Architecture -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-icon">🧠</span>
+                <h2>Network Architecture</h2>
+            </div>
+            <div class="form-group">
+                <label>Network Type:</label>
+                <select id="networkType" onchange="updateNetwork()">
+                    <option value="feedforward">Feed Forward (FF)</option>
+                    <option value="pattern">Pattern Recognition</option>
+                    <option value="fit">Fitting Network</option>
+                    <option value="lstm">LSTM</option>
+                    <option value="gru">GRU</option>
+                    <option value="cnn">CNN</option>
+                </select>
+            </div>
+            
+            <div class="network-config">
+                <div class="config-card">
+                    <h3>Hidden Layers</h3>
+                    <input type="number" id="hiddenLayers" class="number" value="1" min="1" max="5" onchange="updateNetwork()">
+                </div>
+                <div class="config-card">
+                    <h3>Neurons per Layer</h3>
+                    <input type="number" id="neuronsPerLayer" class="number" value="10" min="1" max="50" onchange="updateNetwork()">
+                </div>
+            </div>
+
+            <!-- MATLAB-style Network Visualization -->
+            <div class="matlab-network-container">
+                <div class="matlab-title-bar">
+                    <div class="matlab-icon">M</div>
+                    <span class="matlab-title" id="networkTitle">Pattern Recognition Neural Network (view)</span>
+                </div>
+                <div class="network-diagram" id="networkDiagram">
+                    <div class="layer-container" id="layerContainer">
+                        <!-- Dynamic content will be generated here -->
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Data & Prediction Settings -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-icon">📅</span>
+                <h2>Data & Prediction Settings</h2>
+            </div>
+            <div class="prediction-horizon">
+                <div class="form-group">
+                    <label>Input Date (Training Start):</label>
+                    <input type="date" id="startDate" value="2024-01-01" onchange="updateOutputDate()">
+                </div>
+                <div class="form-group">
+                    <label>Prediction Horizon (Days):</label>
+                    <input type="number" id="horizon" value="7" min="1" max="30" onchange="updateOutputDate()">
+                    <div class="date-display">
+                        <strong>Output Date:</strong> <span id="outputDate">2024-01-08</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="action-buttons">
+                <button class="btn btn-primary" onclick="runPrediction()">RUN PREDICTION</button>
+                <button class="btn btn-success" onclick="exportExcel()">EXPORT TO EXCEL</button>
+                <button class="btn btn-warning" onclick="exportMat()">⬇ DOWNLOAD MATLAB SCRIPT</button>
+            </div>
+
+            <!-- MATLAB Instruction Card -->
+            <div id="matlabInstructionCard" style="
+                background: linear-gradient(135deg, #0f172a 0%, #1e3a8a 100%);
+                border-radius: 16px;
+                padding: 22px 26px;
+                margin-top: 18px;
+                color: white;
+                box-shadow: 0 8px 32px rgba(30,58,138,0.35);
+                border: 1px solid rgba(99,179,237,0.25);
+            ">
+                <div style="display:flex; align-items:center; gap:12px; margin-bottom:16px;">
+                    <div style="background:linear-gradient(135deg,#ff6b35,#f7931e);border-radius:10px;width:42px;height:42px;display:flex;align-items:center;justify-content:center;font-size:1.4rem;flex-shrink:0;">M</div>
+                    <div>
+                        <div style="font-size:1.05rem;font-weight:700;letter-spacing:0.3px;">Run Your Simulation in MATLAB</div>
+                        <div style="font-size:0.78rem;color:#93c5fd;margin-top:2px;">Works with Licensed MATLAB · Cracked MATLAB · MATLAB Online (Free)</div>
+                    </div>
+                </div>
+
+                <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; margin-bottom:18px;">
+                    <!-- Step 1 -->
+                    <div style="background:rgba(255,255,255,0.07);border-radius:12px;padding:14px;border:1px solid rgba(255,255,255,0.1);">
+                        <div style="background:#3b82f6;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.85rem;margin-bottom:10px;">1</div>
+                        <div style="font-weight:600;font-size:0.9rem;margin-bottom:6px;">Run Prediction</div>
+                        <div style="font-size:0.78rem;color:#cbd5e1;line-height:1.5;">Set your plant parameters above and click <strong style="color:white;">RUN PREDICTION</strong> first to generate your simulation data.</div>
+                    </div>
+                    <!-- Step 2 -->
+                    <div style="background:rgba(255,255,255,0.07);border-radius:12px;padding:14px;border:1px solid rgba(255,255,255,0.1);">
+                        <div style="background:#f59e0b;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.85rem;margin-bottom:10px;">2</div>
+                        <div style="font-weight:600;font-size:0.9rem;margin-bottom:6px;">Download Script</div>
+                        <div style="font-size:0.78rem;color:#cbd5e1;line-height:1.5;">Click <strong style="color:white;">⬇ DOWNLOAD MATLAB SCRIPT</strong> above. A <code style="background:rgba(255,255,255,0.15);padding:1px 5px;border-radius:4px;">.m</code> file will download to your computer.</div>
+                    </div>
+                    <!-- Step 3 -->
+                    <div style="background:rgba(255,255,255,0.07);border-radius:12px;padding:14px;border:1px solid rgba(255,255,255,0.1);">
+                        <div style="background:#10b981;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.85rem;margin-bottom:10px;">3</div>
+                        <div style="font-weight:600;font-size:0.9rem;margin-bottom:6px;">Open in MATLAB</div>
+                        <div style="font-size:0.78rem;color:#cbd5e1;line-height:1.5;">Open the file in your MATLAB (any version) and press <strong style="color:white;">Run</strong>. All 6 simulation figures open automatically.</div>
+                    </div>
+                </div>
+
+                <!-- Two option buttons -->
+                <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;">
+                    <div style="flex:1;min-width:220px;background:rgba(255,255,255,0.06);border-radius:12px;padding:14px 16px;border:1px solid rgba(255,255,255,0.12);">
+                        <div style="font-size:0.78rem;color:#93c5fd;font-weight:600;margin-bottom:4px;">💻 OPTION A — Local MATLAB (Licensed or Cracked)</div>
+                        <div style="font-size:0.78rem;color:#e2e8f0;line-height:1.5;">Download the script → Open MATLAB on your PC → Go to the downloaded file → Click <strong>Run</strong>. Works with any MATLAB version R2022b and above.</div>
+                    </div>
+                    <div style="flex:1;min-width:220px;background:rgba(255,255,255,0.06);border-radius:12px;padding:14px 16px;border:1px solid rgba(99,179,237,0.3);">
+                        <div style="font-size:0.78rem;color:#34d399;font-weight:600;margin-bottom:4px;">🌐 OPTION B — MATLAB Online (No Installation Needed)</div>
+                        <div style="font-size:0.78rem;color:#e2e8f0;line-height:1.5;margin-bottom:10px;">No MATLAB installed? Use the free browser version. Create a free MathWorks account, upload the script, and run it — all in your browser.</div>
+                        <a href="https://matlab.mathworks.com" target="_blank" style="
+                            display:inline-block;background:linear-gradient(135deg,#10b981,#059669);
+                            color:white;padding:7px 16px;border-radius:8px;font-size:0.8rem;
+                            font-weight:700;text-decoration:none;letter-spacing:0.3px;">
+                            🌐 Open MATLAB Online →
+                        </a>
+                    </div>
+                </div>
+
+                <div style="margin-top:14px;padding:10px 14px;background:rgba(245,158,11,0.12);border-radius:8px;border-left:3px solid #f59e0b;font-size:0.76rem;color:#fcd34d;line-height:1.5;">
+                    ⚠ <strong>Note for Cracked MATLAB users:</strong> Make sure your cracked version includes the <strong>Deep Learning Toolbox</strong>. If you see an error like <code style="background:rgba(0,0,0,0.2);padding:1px 5px;border-radius:3px;">Undefined function 'feedforwardnet'</code> — use MATLAB Online instead (Option B), which always has all toolboxes available for free.
+                </div>
+            </div>
+
+            <div class="status-bar" style="margin-top:14px;">
+                <div class="status-dot"></div>
+                <span>System Ready - Configure input parameters</span>
+                <span style="margin-left: auto; color: #6b7280;">Web Deployment Mode | MATLAB via Script Download</span>
+            </div>
+        </div>
+
+        <!-- Results Section (Hidden initially) -->
+        <div id="resultsSection" class="output-section" style="display: none;">
+            <h2 style="margin-bottom: 20px;">📊 Prediction Results</h2>
+            <div class="metric-cards">
+                <div class="metric-card">
+                    <div class="metric-value" id="rmse">0.024</div>
+                    <div class="metric-label">RMSE</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value" id="mae">0.018</div>
+                    <div class="metric-label">MAE</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value" id="r2">0.987</div>
+                    <div class="metric-label">R² Score</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value" id="accuracy">98.7%</div>
+                    <div class="metric-label">Accuracy</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Plant parameters database
+        const plantParameters = {
+            asp: [
+                { id: 'cod_inf', label: 'COD Influent', unit: 'mg/L', default: 450, min: 100, max: 1000 },
+                { id: 'bod_inf', label: 'BOD Influent', unit: 'mg/L', default: 250, min: 50, max: 500 },
+                { id: 'tss_inf', label: 'TSS Influent', unit: 'mg/L', default: 300, min: 50, max: 600 },
+                { id: 'nh3_inf', label: 'NH3-N Influent', unit: 'mg/L', default: 40, min: 10, max: 100 },
+                { id: 'flow', label: 'Flow Rate', unit: 'm³/d', default: 10000, min: 1000, max: 50000 },
+                { id: 'do', label: 'Dissolved Oxygen', unit: 'mg/L', default: 2.5, min: 0.5, max: 5.0 },
+                { id: 'mlss', label: 'MLSS', unit: 'mg/L', default: 3500, min: 1500, max: 5000 },
+                { id: 'sludge_age', label: 'Sludge Age', unit: 'd', default: 12, min: 5, max: 30 }
+            ],
+            mbr: [
+                { id: 'cod_inf', label: 'COD Influent', unit: 'mg/L', default: 500, min: 100, max: 1000 },
+                { id: 'bod_inf', label: 'BOD Influent', unit: 'mg/L', default: 300, min: 50, max: 600 },
+                { id: 'tmp', label: 'Transmembrane Pressure', unit: 'kPa', default: 0.25, min: 0.1, max: 0.5 },
+                { id: 'flux', label: 'Membrane Flux', unit: 'LMH', default: 25, min: 10, max: 40 },
+                { id: 'do', label: 'Dissolved Oxygen', unit: 'mg/L', default: 3.0, min: 1.0, max: 6.0 },
+                { id: 'srt', label: 'SRT', unit: 'd', default: 20, min: 10, max: 40 }
+            ],
+            sbr: [
+                { id: 'cod_inf', label: 'COD Influent', unit: 'mg/L', default: 400, min: 100, max: 800 },
+                { id: 'cycle_time', label: 'Cycle Time', unit: 'h', default: 8, min: 4, max: 12 },
+                { id: 'fill_time', label: 'Fill Time', unit: 'h', default: 2, min: 0.5, max: 3 },
+                { id: 'react_time', label: 'React Time', unit: 'h', default: 4, min: 2, max: 8 },
+                { id: 'do', label: 'Dissolved Oxygen', unit: 'mg/L', default: 2.0, min: 0.5, max: 4.0 }
+            ],
+            mle: [
+                { id: 'cod_inf', label: 'COD Influent', unit: 'mg/L', default: 450, min: 100, max: 1000 },
+                { id: 'tn_inf', label: 'Total Nitrogen', unit: 'mg/L', default: 60, min: 20, max: 120 },
+                { id: 'internal_recycle', label: 'Internal Recycle Ratio', unit: '%', default: 200, min: 100, max: 400 },
+                { id: 'sludge_recycle', label: 'Sludge Recycle Ratio', unit: '%', default: 50, min: 25, max: 100 }
+            ],
+            bardenpho: [
+                { id: 'cod_inf', label: 'COD Influent', unit: 'mg/L', default: 500, min: 100, max: 1200 },
+                { id: 'tp_inf', label: 'Total Phosphorus', unit: 'mg/L', default: 8, min: 2, max: 20 },
+                { id: 'stages', label: 'Anoxic Stages', unit: 'count', default: 2, min: 1, max: 3 },
+                { id: 'anaerobic_hrt', label: 'Anaerobic HRT', unit: 'h', default: 1.5, min: 0.5, max: 3 }
+            ]
+        };
+
+        const outputParameters = {
+            asp: ['COD Effluent', 'BOD Effluent', 'TSS Effluent', 'NH3-N Effluent', 'Sludge Volume Index'],
+            mbr: ['COD Effluent', 'BOD Effluent', 'NH3-N Effluent', 'TMP Trend', 'Fouling Rate'],
+            sbr: ['COD Effluent', 'BOD Effluent', 'Cycle Efficiency', 'Denitrification Rate'],
+            mle: ['TN Effluent', 'NH3-N Effluent', 'NO3-N Effluent', 'Denitrification Efficiency'],
+            bardenpho: ['TP Effluent', 'PO4-P Effluent', 'COD Effluent', 'Nitrogen Removal', 'Phosphorus Removal']
+        };
+
+        let currentParams = [];
+
+        function updateParameters() {
+            const plantType = document.getElementById('plantType').value;
+            const container = document.getElementById('parameterContainer');
+            const outputContainer = document.getElementById('outputContainer');
+            
+            if (!plantType) {
+                container.innerHTML = '<p style="color: #9ca3af; font-style: italic; grid-column: 1/-1;">Please select a plant type first...</p>';
+                outputContainer.innerHTML = 'Please select a plant type first...';
+                updateNetwork();
+                return;
+            }
+
+            // Generate input parameters
+            currentParams = plantParameters[plantType] || [];
+            container.innerHTML = currentParams.map(param => `
+                <div class="parameter-item">
+                    <input type="checkbox" id="check_${param.id}" checked onchange="updateNetwork()">
+                    <div style="flex: 1;">
+                        <label for="check_${param.id}" style="margin: 0; font-size: 0.9rem;">
+                            ${param.label} (${param.unit})
+                        </label>
+                        <input type="number" id="val_${param.id}" value="${param.default}" 
+                               min="${param.min}" max="${param.max}" step="0.1">
+                    </div>
+                </div>
+            `).join('');
+
+            // Generate output parameters
+            const outputs = outputParameters[plantType] || [];
+            outputContainer.innerHTML = `
+                <div class="parameter-grid">
+                    ${outputs.map((output, idx) => `
+                        <div class="parameter-item">
+                            <input type="checkbox" id="out_${idx}" checked onchange="updateNetwork()">
+                            <label for="out_${idx}" style="margin: 0;">${output}</label>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+
+            // Update network visualization with new input/output count
+            updateNetwork();
+        }
+
+        function getSelectedCount(type) {
+            const plantType = document.getElementById('plantType').value;
+            if (!plantType) return type === 'input' ? 3 : 2;
+            
+            if (type === 'input') {
+                const checkboxes = document.querySelectorAll('#parameterContainer input[type="checkbox"]');
+                return Array.from(checkboxes).filter(cb => cb.checked).length || 3;
+            } else {
+                const checkboxes = document.querySelectorAll('#outputContainer input[type="checkbox"]');
+                return Array.from(checkboxes).filter(cb => cb.checked).length || 2;
+            }
+        }
+
+        function loadDefaults() {
+            const plantType = document.getElementById('plantType').value;
+            if (plantType) updateParameters();
+        }
+
+        function clearAll() {
+            document.querySelectorAll('input[type="number"]').forEach(input => input.value = '');
+            document.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = false);
+            updateNetwork();
+        }
+
+        function randomizeData() {
+            const plantType = document.getElementById('plantType').value;
+            if (!plantType) return;
+            
+            currentParams.forEach(param => {
+                const randomVal = (Math.random() * (param.max - param.min) + param.min).toFixed(2);
+                const input = document.getElementById(`val_${param.id}`);
+                if (input) input.value = randomVal;
+            });
+        }
+
+        // MATLAB-style Neural Network Visualization
+        function updateNetwork() {
+            const networkType = document.getElementById('networkType').value;
+            const hiddenLayers = parseInt(document.getElementById('hiddenLayers').value) || 1;
+            const neuronsPerLayer = parseInt(document.getElementById('neuronsPerLayer').value) || 10;
+            
+            const inputCount = getSelectedCount('input');
+            const outputCount = getSelectedCount('output');
+            
+            // Update title
+            const titles = {
+                'feedforward': 'Feed Forward Neural Network (view)',
+                'pattern': 'Pattern Recognition Neural Network (view)',
+                'fit': 'Fitting Neural Network (view)',
+                'lstm': 'LSTM Neural Network (view)',
+                'gru': 'GRU Neural Network (view)',
+                'cnn': 'CNN Neural Network (view)'
+            };
+            document.getElementById('networkTitle').textContent = titles[networkType] || 'Neural Network (view)';
+            
+            // Generate diagram
+            const container = document.getElementById('layerContainer');
+            let html = '';
+            
+            // Input Layer
+            html += createInputLayer(inputCount);
+            
+            // Hidden Layers
+            for (let i = 0; i < hiddenLayers; i++) {
+                html += createConnector();
+                html += createHiddenLayer(neuronsPerLayer, i + 1);
+            }
+            
+            // Output Layer
+            html += createConnector();
+            html += createOutputLayer(outputCount);
+            
+            // Final Output
+            html += createConnector();
+            html += createFinalOutput(outputCount);
+            
+            container.innerHTML = html;
+        }
+
+        function createInputLayer(count) {
+            return `
+                <div class="layer-box">
+                    <div class="layer-label">Input</div>
+                    <div class="neuron-group">
+                        <div class="matlab-neuron input-neuron">${count}</div>
+                    </div>
+                    <div class="node-count">${count} nodes</div>
+                </div>
+            `;
+        }
+
+        function createHiddenLayer(neurons, layerNum) {
+            return `
+                <div class="layer-box">
+                    <div class="layer-label">Hidden ${layerNum}</div>
+                    <div class="neuron-group">
+                        <div class="matlab-neuron hidden-neuron">
+                            <div class="hidden-detail">
+                                <div style="display: flex; gap: 2px;">
+                                    <div class="weight-box">W</div>
+                                    <div class="bias-box">b</div>
+                                </div>
+                                <div class="math-symbol">⊕</div>
+                                <div style="font-size: 12px;">f(·)</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="node-count">${neurons} neurons</div>
+                </div>
+            `;
+        }
+
+        function createOutputLayer(count) {
+            return `
+                <div class="layer-box">
+                    <div class="layer-label">Output</div>
+                    <div class="neuron-group">
+                        <div class="matlab-neuron output-neuron">
+                            <div class="hidden-detail">
+                                <div style="display: flex; gap: 2px;">
+                                    <div class="weight-box">W</div>
+                                    <div class="bias-box">b</div>
+                                </div>
+                                <div class="math-symbol">⊕</div>
+                                <div style="font-size: 10px;">softmax</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="node-count">${count} outputs</div>
+                </div>
+            `;
+        }
+
+        function createFinalOutput(count) {
+            return `
+                <div class="layer-box">
+                    <div class="layer-label">Output</div>
+                    <div class="neuron-group">
+                        <div class="matlab-neuron input-neuron" style="background: linear-gradient(135deg, #FFB6C1, #FF69B4); border-color: #C71585;">${count}</div>
+                    </div>
+                    <div class="node-count">${count} classes</div>
+                </div>
+            `;
+        }
+
+        function createConnector() {
+            return `
+                <div class="layer-connector">
+                    <div class="connector-dot"></div>
+                    <div class="connector-line-h"></div>
+                    <div class="arrow-right"></div>
+                    <div class="connector-dot"></div>
+                </div>
+            `;
+        }
+
+        function updateOutputDate() {
+            const startDate = new Date(document.getElementById('startDate').value);
+            const horizon = parseInt(document.getElementById('horizon').value) || 0;
+            const outputDate = new Date(startDate);
+            outputDate.setDate(outputDate.getDate() + horizon);
+            document.getElementById('outputDate').textContent = outputDate.toISOString().split('T')[0];
+        }
+
+        function handleFileUpload(event) {
+            const file = event.target.files[0];
+            if (file) {
+                const zone = document.getElementById('uploadZone');
+                zone.innerHTML = `
+                    <div class="upload-icon">✅</div>
+                    <h3 style="color: #1e3a8a;">${file.name}</h3>
+                    <p style="color: #6b7280; margin-top: 10px;">
+                        ${(file.size / 1024).toFixed(1)} KB &nbsp;·&nbsp; Click to change file
+                    </p>
+                    <input type="file" id="fileInput" style="display: none;" accept=".xlsx,.xls,.csv" onchange="handleFileUpload(event)">
+                `;
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  BACKEND INTEGRATION — do not change layout above
+        // ═══════════════════════════════════════════════════════════
+        const API = 'http://localhost:5000/api';
+        let _pred = null;   // last prediction response
+        let _metricCharts = {};  // Chart.js instances
+
+        // ── collect selected input ids ──────────────────────────
+        function getSelectedInputIds() {
+            return currentParams
+                .filter(p => { const cb = document.getElementById(`check_${p.id}`); return cb && cb.checked; })
+                .map(p => p.id);
+        }
+
+        // ── collect selected output indices ──────────────────────
+        function getSelectedOutputIdxs() {
+            const cbs = document.querySelectorAll('#outputContainer input[type="checkbox"]');
+            return Array.from(cbs).map((cb,i) => cb.checked ? i : -1).filter(i => i >= 0);
+        }
+
+        // ── collect param values ──────────────────────────────────
+        function collectParams() {
+            const pt = document.getElementById('plantType').value;
+            if (!pt) return null;
+            const params = {};
+            currentParams.forEach(p => {
+                const el = document.getElementById(`val_${p.id}`);
+                params[p.id] = el ? el.value : p.default;
+            });
+            return { plantType: pt, params };
+        }
+
+        // ── nn config ──────────────────────────────────────────────
+        function getNNConfig() {
+            return {
+                networkType:     document.getElementById('networkType').value,
+                hiddenLayers:    parseInt(document.getElementById('hiddenLayers').value) || 1,
+                neuronsPerLayer: parseInt(document.getElementById('neuronsPerLayer').value) || 10,
+                trainAlgo:       'trainlm',
+                activationFn:    'tansig',
+                maxEpochs:       1000,
+                trainRatio:      0.70,
+                valRatio:        0.15,
+            };
+        }
+
+        // ── capture network diagram as base64 PNG ──────────────────
+        async function captureNetworkDiagram() {
+            if (typeof html2canvas === 'undefined') return '';
+            try {
+                // Target the full outer container
+                const outer = document.querySelector('.matlab-network-container');
+                const diagram = document.getElementById('networkDiagram');
+                const layerCont = document.getElementById('layerContainer');
+                if (!outer || !diagram || !layerCont) return '';
+
+                // Save original styles
+                const origDiagOverflow  = diagram.style.overflow;
+                const origDiagMinH      = diagram.style.minHeight;
+                const origLayerMinW     = layerCont.style.minWidth;
+                const origOuterW        = outer.style.width;
+
+                // Get the full scrollable content size
+                const fullW = layerCont.scrollWidth + 80;
+                const fullH = layerCont.scrollHeight + 80;
+
+                // Temporarily remove overflow clipping so html2canvas sees everything
+                diagram.style.overflow  = 'visible';
+                diagram.style.minHeight = fullH + 'px';
+                layerCont.style.minWidth = fullW + 'px';
+                outer.style.width       = fullW + 'px';
+
+                // Small wait for layout reflow
+                await new Promise(r => setTimeout(r, 80));
+
+                const canvas = await html2canvas(outer, {
+                    backgroundColor: '#e8e8e8',
+                    scale: 2,
+                    useCORS: true,
+                    scrollX: 0,
+                    scrollY: 0,
+                    width:  outer.scrollWidth,
+                    height: outer.scrollHeight,
+                    windowWidth:  outer.scrollWidth,
+                    windowHeight: outer.scrollHeight,
+                });
+
+                // Restore original styles
+                diagram.style.overflow  = origDiagOverflow;
+                diagram.style.minHeight = origDiagMinH;
+                layerCont.style.minWidth = origLayerMinW;
+                outer.style.width       = origOuterW;
+
+                return canvas.toDataURL('image/png');
+            } catch(e) {
+                console.error('Diagram capture error:', e);
+                return '';
+            }
+        }
+
+        // ── animate a single metric counter ───────────────────────
+        function animateCounter(id, target, decimals, suffix='') {
+            const el = document.getElementById(id);
+            if (!el) return;
+            let cur = 0; const steps = 60; const inc = target / steps;
+            const t = setInterval(() => {
+                cur = Math.min(cur + inc, target);
+                el.textContent = cur.toFixed(decimals) + suffix;
+                if (cur >= target) clearInterval(t);
+            }, 20);
+        }
+
+        function animateMetrics() { /* overridden below — kept for compatibility */ }
+
+        // ── render results table inside existing resultsSection ───
+        function renderResultsTable(results) {
+            // Remove previous table if any
+            const old = document.getElementById('_backendTable');
+            if (old) old.remove();
+
+            const STATUS_COLOR = {
+                COMPLIANT:'#065f46', PASS:'#065f46',
+                MARGINAL:'#92400e', FAIL:'#991b1b', EXCEEDANCE:'#991b1b'
+            };
+            const STATUS_BG = {
+                COMPLIANT:'#d1fae5', PASS:'#d1fae5',
+                MARGINAL:'#fef3c7', FAIL:'#fee2e2', EXCEEDANCE:'#fee2e2'
+            };
+
+            const div = document.createElement('div');
+            div.id = '_backendTable';
+            div.style.cssText = 'background:white;border-radius:12px;padding:20px;margin-top:20px;overflow-x:auto;';
+            div.innerHTML = `
+                <h3 style="color:#1e3a8a;margin-bottom:15px;font-size:1.1rem;">📋 Effluent Prediction Results</h3>
+                <table style="width:100%;border-collapse:collapse;font-size:0.9rem;">
+                    <thead>
+                        <tr style="background:#1e3a8a;color:white;">
+                            <th style="padding:10px 14px;text-align:left;">Parameter</th>
+                            <th style="padding:10px 14px;text-align:right;">Predicted Value</th>
+                            <th style="padding:10px 14px;text-align:center;">Unit</th>
+                            <th style="padding:10px 14px;text-align:right;">Standard</th>
+                            <th style="padding:10px 14px;text-align:center;">Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${results.map(r => `
+                        <tr style="border-bottom:1px solid #e5e7eb;">
+                            <td style="padding:10px 14px;font-weight:600;color:#1e3a8a;">${r.parameter}</td>
+                            <td style="padding:10px 14px;text-align:right;font-weight:700;color:#2563eb;font-size:1rem;">${r.predicted}</td>
+                            <td style="padding:10px 14px;text-align:center;color:#6b7280;">${r.unit}</td>
+                            <td style="padding:10px 14px;text-align:right;color:#6b7280;">${r.standard}</td>
+                            <td style="padding:10px 14px;text-align:center;">
+                                <span style="background:${STATUS_BG[r.status]||'#f3f4f6'};
+                                    color:${STATUS_COLOR[r.status]||'#374151'};
+                                    border:1px solid ${STATUS_COLOR[r.status]||'#374151'};
+                                    padding:3px 10px;border-radius:20px;
+                                    font-size:0.78rem;font-weight:700;">${r.status}</span>
+                            </td>
+                        </tr>`).join('')}
+                    </tbody>
+                </table>`;
+
+            document.getElementById('resultsSection').appendChild(div);
+        }
+
+        // ── render MATLAB vs Prediction comparison charts ──────────
+        function renderMetricCharts(history) {
+            // This is called after prediction — we render comparison using _pred.results
+            renderMatlabVsPrediction(_pred ? _pred.results : []);
+        }
+
+        function renderMatlabVsPrediction(results) {
+            // Remove previous chart area if any
+            const old = document.getElementById('_metricCharts');
+            if (old) old.remove();
+
+            if (!results || results.length === 0) return;
+
+            // Destroy old comparison charts
+            Object.values(_metricCharts).forEach(c => c.destroy());
+            _metricCharts = {};
+
+            const labels   = results.map(r => r.parameter);
+            const predicted= results.map(r => parseFloat(r.predicted));
+            const matlab   = results.map(r => parseFloat(r.standard));
+            const units    = results.map(r => r.unit);
+
+            // Status colors per bar
+            const STATUS_COLOR_MAP = {
+                COMPLIANT: 'rgba(16,185,129,0.85)', PASS: 'rgba(16,185,129,0.85)',
+                MARGINAL:  'rgba(245,158,11,0.85)',
+                FAIL:      'rgba(239,68,68,0.85)',   EXCEEDANCE:'rgba(239,68,68,0.85)'
+            };
+            const barColors = results.map(r => STATUS_COLOR_MAP[r.status] || 'rgba(59,130,246,0.85)');
+
+            const div = document.createElement('div');
+            div.id = '_metricCharts';
+            div.style.cssText = 'background:white;border-radius:12px;padding:24px;margin-top:20px;';
+            div.innerHTML = `
+                <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px;padding-bottom:14px;border-bottom:2px solid #e5e7eb;">
+                    <span style="font-size:1.4rem;">📊</span>
+                    <h3 style="color:#1e3a8a;font-size:1.15rem;margin:0;">MATLAB Simulation vs Neural Network Prediction</h3>
+                </div>
+
+                <!-- Legend -->
+                <div style="display:flex;gap:24px;margin-bottom:20px;flex-wrap:wrap;align-items:center;">
+                    <div style="display:flex;align-items:center;gap:8px;">
+                        <div style="width:18px;height:18px;background:#fb923c;border-radius:4px;border:2px solid #ea580c;"></div>
+                        <span style="font-size:0.85rem;color:#374151;font-weight:600;">MATLAB Standard / Reference</span>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:8px;">
+                        <div style="width:18px;height:18px;background:#10b981;border-radius:4px;border:2px solid #059669;"></div>
+                        <span style="font-size:0.85rem;color:#374151;font-weight:600;">NN Predicted</span>
+                    </div>
+                </div>
+
+                <!-- Grouped Bar Chart -->
+                <div style="background:#f8fafc;border-radius:10px;padding:20px;margin-bottom:20px;">
+                    <h4 style="color:#374151;margin-bottom:14px;font-size:0.95rem;font-weight:700;">
+                        🔵 Side-by-Side: MATLAB Standard vs Predicted Values
+                    </h4>
+                    <canvas id="_chartCompare" height="120"></canvas>
+                </div>
+
+                <!-- Per-parameter detail cards -->
+                <h4 style="color:#374151;margin-bottom:14px;font-size:0.95rem;font-weight:700;">
+                    📌 Per-Parameter Deviation Analysis
+                </h4>
+                <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px;" id="_compCards"></div>
+
+                <!-- Error / Residual chart -->
+                <div style="background:#f8fafc;border-radius:10px;padding:20px;margin-top:20px;">
+                    <h4 style="color:#374151;margin-bottom:14px;font-size:0.95rem;font-weight:700;">
+                        📉 Prediction Error (Predicted − MATLAB Standard)
+                    </h4>
+                    <canvas id="_chartError" height="100"></canvas>
+                </div>`;
+
+            document.getElementById('resultsSection').appendChild(div);
+
+            // ─── Grouped Bar Chart ────────────────────────────────────
+            _metricCharts.compare = new Chart(document.getElementById('_chartCompare'), {
+                type: 'bar',
+                data: {
+                    labels,
+                    datasets: [
+                        {
+                            label: 'MATLAB Standard',
+                            data: matlab,
+                            backgroundColor: 'rgba(251,146,60,0.80)',
+                            borderColor: '#ea580c',
+                            borderWidth: 1.5,
+                            borderRadius: 5,
+                        },
+                        {
+                            label: 'NN Predicted',
+                            data: predicted,
+                            backgroundColor: 'rgba(16,185,129,0.82)',
+                            borderColor: '#059669',
+                            borderWidth: 1.5,
+                            borderRadius: 5,
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: {
+                        legend: { position: 'top', labels: { font: { size: 11 } } },
+                        tooltip: {
+                            callbacks: {
+                                label: (ctx) => {
+                                    const u = units[ctx.dataIndex] || '';
+                                    return ` ${ctx.dataset.label}: ${ctx.parsed.y.toFixed(3)} ${u}`;
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: { ticks: { font: { size: 11 } }, grid: { display: false } },
+                        y: { ticks: { font: { size: 11 } }, grid: { color: '#f0f0f0' },
+                             title: { display: true, text: 'Value', font: { size: 11 } } }
+                    }
+                }
+            });
+
+            // ─── Per-parameter detail cards ───────────────────────────
+            const cardsContainer = div.querySelector('#_compCards');
+            results.forEach((r, i) => {
+                const pred_v = parseFloat(r.predicted);
+                const mat_v  = parseFloat(r.standard);
+                const error  = pred_v - mat_v;
+                const errPct = mat_v !== 0 ? ((error / mat_v) * 100).toFixed(1) : '—';
+                const colorMap = { COMPLIANT:'#065f46', PASS:'#065f46', MARGINAL:'#92400e', FAIL:'#991b1b', EXCEEDANCE:'#991b1b' };
+                const bgMap    = { COMPLIANT:'#d1fae5', PASS:'#d1fae5', MARGINAL:'#fef3c7', FAIL:'#fee2e2', EXCEEDANCE:'#fee2e2' };
+                const barW = Math.min(100, Math.abs((pred_v / (mat_v || 1)) * 100));
+                const barColor = barColors[i];
+                const card = document.createElement('div');
+                card.style.cssText = 'background:#f8fafc;border-radius:10px;padding:16px;border:1px solid #e5e7eb;';
+                card.innerHTML = `
+                    <div style="font-weight:700;color:#1e3a8a;font-size:0.9rem;margin-bottom:8px;">${r.parameter}</div>
+                    <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+                        <span style="font-size:0.78rem;color:#6b7280;">MATLAB Std:</span>
+                        <span style="font-size:0.82rem;font-weight:600;color:#374151;">${mat_v.toFixed(3)} ${r.unit}</span>
+                    </div>
+                    <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+                        <span style="font-size:0.78rem;color:#6b7280;">NN Predicted:</span>
+                        <span style="font-size:0.82rem;font-weight:700;color:#2563eb;">${pred_v.toFixed(3)} ${r.unit}</span>
+                    </div>
+                    <div style="display:flex;justify-content:space-between;margin-bottom:10px;">
+                        <span style="font-size:0.78rem;color:#6b7280;">Deviation:</span>
+                        <span style="font-size:0.82rem;font-weight:600;color:${error > 0 ? '#ef4444' : '#10b981'};">${error >= 0 ? '+' : ''}${error.toFixed(3)} (${errPct}%)</span>
+                    </div>
+                    <!-- Progress bar -->
+                    <div style="background:#e5e7eb;border-radius:4px;height:8px;overflow:hidden;margin-bottom:8px;">
+                        <div style="width:${barW}%;height:100%;background:${barColor};border-radius:4px;transition:width 0.6s;"></div>
+                    </div>
+                    <div style="text-align:center;">
+                        <span style="background:${bgMap[r.status]||'#f3f4f6'};color:${colorMap[r.status]||'#374151'};
+                            border:1px solid ${colorMap[r.status]||'#374151'};
+                            padding:2px 10px;border-radius:20px;font-size:0.75rem;font-weight:700;">${r.status}</span>
+                    </div>`;
+                cardsContainer.appendChild(card);
+            });
+
+            // ─── Error/Residual Bar Chart ─────────────────────────────
+            const errors = results.map(r => parseFloat(r.predicted) - parseFloat(r.standard));
+            const errorColors = errors.map(e => e > 0 ? 'rgba(239,68,68,0.8)' : 'rgba(16,185,129,0.8)');
+
+            _metricCharts.error = new Chart(document.getElementById('_chartError'), {
+                type: 'bar',
+                data: {
+                    labels,
+                    datasets: [{
+                        label: 'Prediction Error (Predicted − Standard)',
+                        data: errors,
+                        backgroundColor: errorColors,
+                        borderColor: errorColors.map(c => c.replace('0.8','1')),
+                        borderWidth: 1.5,
+                        borderRadius: 5,
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                label: (ctx) => {
+                                    const u = units[ctx.dataIndex] || '';
+                                    return ` Error: ${ctx.parsed.y >= 0 ? '+' : ''}${ctx.parsed.y.toFixed(4)} ${u}`;
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: { ticks: { font: { size: 11 } }, grid: { display: false } },
+                        y: {
+                            ticks: { font: { size: 11 } },
+                            grid: { color: '#f0f0f0' },
+                            title: { display: true, text: 'Error (Predicted − Standard)', font: { size: 11 } }
+                        }
+                    }
+                }
+            });
+        }
+
+        // ── RUN PREDICTION ─────────────────────────────────────────
+        async function runPrediction() {
+            const collected = collectParams();
+            if (!collected || !collected.plantType) {
+                alert('Please select a plant type first.'); return;
+            }
+
+            const statusSpan = document.querySelector('.status-bar span');
+            const statusDot  = document.querySelector('.status-dot');
+            statusSpan.textContent = 'Running prediction...';
+            statusDot.style.background = '#f59e0b';
+
+            try {
+                const res = await fetch(`${API}/predict`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        plantType:       collected.plantType,
+                        params:          collected.params,
+                        nnConfig:        getNNConfig(),
+                        selectedInputs:  getSelectedInputIds(),
+                        selectedOutputs: getSelectedOutputIdxs(),
+                    })
+                });
+                if (!res.ok) throw new Error(`Server error ${res.status}`);
+                const json = await res.json();
+                if (!json.success) throw new Error(json.error || 'Prediction failed');
+
+                _pred = json;
+
+                // Show results section
+                document.getElementById('resultsSection').style.display = 'block';
+                statusSpan.textContent = 'Prediction complete! ✔';
+                statusDot.style.background = '#22c55e';
+
+                // Animate existing metric cards
+                animateCounter('r2',       json.metrics.r2,       3);
+                animateCounter('rmse',     json.metrics.rmse,     4);
+                animateCounter('mae',      json.metrics.mae,      4);
+                animateCounter('accuracy', json.metrics.accuracy, 1, '%');
+
+                // Render table + charts
+                renderResultsTable(json.results);
+                renderMetricCharts(json.metrics.history);
+
+                document.getElementById('resultsSection').scrollIntoView({ behavior: 'smooth' });
+
+            } catch (err) {
+                statusSpan.textContent = `Error: ${err.message}`;
+                statusDot.style.background = '#ef4444';
+                alert(`Prediction error: ${err.message}\n\nMake sure backend is running:\n  python app.py`);
+            }
+        }
+
+        // ── EXPORT EXCEL ───────────────────────────────────────────
+        async function exportExcel() {
+            if (!_pred) { alert('Run prediction first.'); return; }
+
+            // Capture network diagram image
+            const imgB64 = await captureNetworkDiagram();
+
+            const collected = collectParams();
+            try {
+                const res = await fetch(`${API}/export-excel`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        plantType:            _pred.plantType,
+                        params:               collected ? collected.params : {},
+                        selectedInputs:       getSelectedInputIds(),
+                        selectedOutputs:      getSelectedOutputIdxs(),
+                        results:              _pred.results,
+                        metrics:              _pred.metrics,
+                        nnConfig:             getNNConfig(),
+                        networkDiagramImage:  imgB64,
+                    })
+                });
+                if (!res.ok) throw new Error(`Server error ${res.status}`);
+                const blob = await res.blob();
+                const url  = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                // Read the actual filename from the server's Content-Disposition header
+                const disposition = res.headers.get('Content-Disposition') || '';
+                const match = disposition.match(/filename=([^;]+)/);
+                const xlNow = new Date();
+                const xlTs = `${xlNow.getFullYear()}-${String(xlNow.getMonth()+1).padStart(2,'0')}-${String(xlNow.getDate()).padStart(2,'0')}_${String(xlNow.getHours()).padStart(2,'0')}-${String(xlNow.getMinutes()).padStart(2,'0')}-${String(xlNow.getSeconds()).padStart(2,'0')}`;
+                a.download = match ? match[1].trim() : `wwtp_${_pred.plantType}_${xlTs}.xlsx`;
+                a.click();
+                URL.revokeObjectURL(url);
+            } catch (err) {
+                alert(`Export error: ${err.message}`);
+            }
+        }
+
+        // ── EXPORT .MAT ────────────────────────────────────────────
+        async function exportMat() {
+            if (!_pred) { alert('Run prediction first.'); return; }
+            const collected = collectParams();
+            try {
+                const res = await fetch(`${API}/export-mat-script`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        plantType:      _pred.plantType,
+                        params:         collected ? collected.params : {},
+                        predicted:      _pred.predicted,
+                        nnConfig:       getNNConfig(),
+                        selectedInputs: getSelectedInputIds(),
+                        selectedOutputs:getSelectedOutputIdxs(),
+                    })
+                });
+                if (!res.ok) throw new Error(`Server error ${res.status}`);
+                const blob = await res.blob();
+                const url  = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                // Read the actual filename from the server's Content-Disposition header
+                const disposition = res.headers.get('Content-Disposition') || '';
+                const match = disposition.match(/filename=([^;]+)/);
+                const now = new Date();
+                const ts = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}_${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}${String(now.getSeconds()).padStart(2,'0')}`;
+                a.download = match ? match[1].trim() : `wwtp_${_pred.plantType}_${ts}.m`;
+                a.click();
+                URL.revokeObjectURL(url);
+            } catch (err) {
+                alert(`MATLAB export error: ${err.message}`);
+            }
+        }
+        // ═══════════════════════════════════════════════════════════
+        //  END BACKEND INTEGRATION
+        // ═══════════════════════════════════════════════════════════
+
+        // Initialize on load
+        window.onload = function() {
+            updateNetwork();
+            updateOutputDate();
+        };
+
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            updateNetwork();
+        });
+
+        // Drag and drop for file upload
+        const uploadZone = document.getElementById('uploadZone');
+        uploadZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadZone.classList.add('dragover');
+        });
+        uploadZone.addEventListener('dragleave', () => {
+            uploadZone.classList.remove('dragover');
+        });
+        uploadZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadZone.classList.remove('dragover');
+            const files = e.dataTransfer.files;
+            if (files.length) handleFileUpload({ target: { files } });
+        });
+    </script>
+</body>
+</html>
