@@ -840,82 +840,187 @@ def export_excel():
     ws3.add_chart(bc2, 'E3')
 
     # ══════════════════════════════════════════════════════════════
-    # SHEET 3 (or 4): Network Diagram image (if provided)
     # ══════════════════════════════════════════════════════════════
-    if nn_img_b64:
-        try:
-            from openpyxl.drawing.image import Image as XLImage
-            from PIL import Image as PILImage
-            img_bytes = base64.b64decode(nn_img_b64.split(',')[-1])
-            img_io = io.BytesIO(img_bytes)
-
-            # Get actual image dimensions to scale properly in Excel
-            pil_img = PILImage.open(io.BytesIO(img_bytes))
-            img_w_px, img_h_px = pil_img.size
-            # Scale to fit nicely — max 900px wide at 96dpi
-            max_w = 900
-            scale = min(1.0, max_w / img_w_px)
-            final_w = int(img_w_px * scale)
-            final_h = int(img_h_px * scale)
-
-            ws_nn = wb.create_sheet('Network Diagram')
-            # Title row
-            ws_nn.merge_cells('A1:L1')
-            ws_nn['A1'].value = 'Neural Network Architecture — Full Diagram'
-            ws_nn['A1'].font  = Font(bold=True, color='FFFFFF', size=14)
-            ws_nn['A1'].fill  = PatternFill('solid', fgColor='0F172A')
-            ws_nn['A1'].alignment = CENTER
-            ws_nn.row_dimensions[1].height = 28
-
-            # Info row
-            ws_nn.merge_cells('A2:L2')
-            ws_nn['A2'].value = f"Plant: {pdata.get('label', pt.upper())}  |  Network: {nn_cfg.get('networkType','feedforward').upper()}  |  Hidden Layers: {nn_cfg.get('hiddenLayers',1)}  |  Neurons/Layer: {nn_cfg.get('neuronsPerLayer',10)}"
-            ws_nn['A2'].font  = Font(italic=True, color='374151', size=10)
-            ws_nn['A2'].fill  = PatternFill('solid', fgColor='F1F5F9')
-            ws_nn['A2'].alignment = CENTER
-            ws_nn.row_dimensions[2].height = 20
-
-            # Expand columns to fit image width (approx 7px per unit)
-            n_cols = max(12, final_w // 60 + 2)
-            for col_i in range(1, n_cols + 1):
-                ws_nn.column_dimensions[get_column_letter(col_i)].width = 12
-
-            # Set row heights so image fits without cropping
-            n_rows = final_h // 20 + 4
-            for row_i in range(3, n_rows + 3):
-                ws_nn.row_dimensions[row_i].height = 20
-
-            xl_img = XLImage(img_io)
-            xl_img.width  = final_w
-            xl_img.height = final_h
-            xl_img.anchor = 'A3'
-            ws_nn.add_image(xl_img)
-        except ImportError:
-            # Pillow not installed — insert image without dimension check
-            try:
-                from openpyxl.drawing.image import Image as XLImage
-                img_bytes = base64.b64decode(nn_img_b64.split(',')[-1])
-                img_io = io.BytesIO(img_bytes)
-                ws_nn = wb.create_sheet('Network Diagram')
-                ws_nn.merge_cells('A1:L1')
-                ws_nn['A1'].value = 'Neural Network Architecture — Full Diagram'
-                ws_nn['A1'].font  = Font(bold=True, color='FFFFFF', size=14)
-                ws_nn['A1'].fill  = PatternFill('solid', fgColor='0F172A')
-                ws_nn['A1'].alignment = CENTER
-                # Set generous column widths
-                for col_i in range(1, 20):
-                    ws_nn.column_dimensions[get_column_letter(col_i)].width = 12
-                for row_i in range(2, 60):
-                    ws_nn.row_dimensions[row_i].height = 20
-                xl_img = XLImage(img_io)
-                xl_img.anchor = 'A2'
-                ws_nn.add_image(xl_img)
-            except Exception:
-                pass
-        except Exception:
-            pass
-
+    # NETWORK DIAGRAM — pure Python PNG (no PIL needed)
     # ══════════════════════════════════════════════════════════════
+    def _make_nn_png(n_in, n_out, n_hidden, npl, afn, ntype):
+        import struct, zlib, math as _m
+        BOX_W, BOX_H, BUBBLE, GAP, PAD, TITLE_H = 90, 110, 46, 80, 50, 36
+        img_w = PAD*2 + BUBBLE + GAP + n_hidden*(BOX_W+GAP) + BOX_W + GAP + BUBBLE + PAD
+        img_h = TITLE_H + 60 + BOX_H + 80
+        px = [[(240,240,240)]*img_w for _ in range(img_h)]
+
+        def fr(x,y,w,h,c):
+            for r in range(max(0,y),min(img_h,y+h)):
+                for col in range(max(0,x),min(img_w,x+w)):
+                    px[r][col]=c
+
+        def fg(x,y,w,h,ct,cb):
+            for r in range(max(0,y),min(img_h,y+h)):
+                t=(r-y)/max(1,h-1)
+                c=tuple(int(ct[i]+(cb[i]-ct[i])*t) for i in range(3))
+                for col in range(max(0,x),min(img_w,x+w)):
+                    px[r][col]=c
+
+        def rb(x,y,w,h,c,th=2):
+            for t in range(th):
+                for col in range(max(0,x),min(img_w,x+w)):
+                    if 0<=y+t<img_h: px[y+t][col]=c
+                    if 0<=y+h-1-t<img_h: px[y+h-1-t][col]=c
+                for r in range(max(0,y),min(img_h,y+h)):
+                    if 0<=x+t<img_w: px[r][x+t]=c
+                    if 0<=x+w-1-t<img_w: px[r][x+w-1-t]=c
+
+        def hline(y,x1,x2,c,th=2):
+            for t in range(th):
+                row=y-th//2+t
+                if 0<=row<img_h:
+                    for col in range(max(0,x1),min(img_w,x2)):
+                        px[row][col]=c
+
+        def arrow(y,x1,x2,c=(80,80,80)):
+            hline(y,x1,x2-8,c,2)
+            for i in range(8):
+                for r in range(y-i,y+i+1):
+                    col=x2-8+i
+                    if 0<=r<img_h and 0<=col<img_w: px[r][col]=c
+
+        def dot(cx,cy,r,c=(80,80,80)):
+            for r2 in range(cy-r,cy+r+1):
+                for c2 in range(cx-r,cx+r+1):
+                    if (r2-cy)**2+(c2-cx)**2<=r**2:
+                        if 0<=r2<img_h and 0<=c2<img_w: px[r2][c2]=c
+
+        def circle_outline(cx,cy,r,c):
+            for a in range(0,360,2):
+                rx=int(cx+r*_m.cos(_m.radians(a)))
+                ry=int(cy+r*_m.sin(_m.radians(a)))
+                if 0<=ry<img_h and 0<=rx<img_w: px[ry][rx]=c
+
+        def wb_internals(ecx,cy2):
+            fr(ecx-24,cy2-28,20,18,(240,240,240)); rb(ecx-24,cy2-28,20,18,(180,180,180),1)
+            fr(ecx+4,cy2-28,20,18,(240,240,240));  rb(ecx+4,cy2-28,20,18,(180,180,180),1)
+            circle_outline(ecx,cy2,11,(255,255,255))
+            hline(cy2,ecx-8,ecx+9,(255,255,255),2)
+            for r2 in range(cy2-8,cy2+9):
+                if 0<=r2<img_h:
+                    if 0<=ecx<img_w: px[r2][ecx]=(255,255,255)
+                    if ecx+1<img_w: px[r2][ecx+1]=(255,255,255)
+
+        # title bar
+        fg(0,0,img_w,TITLE_H,(236,236,236),(200,200,200))
+        rb(0,0,img_w,TITLE_H,(170,170,170),1)
+        fr(8,8,18,18,(224,90,0))   # M icon
+        # white panel
+        fr(PAD-10,TITLE_H+4,img_w-PAD*2+20,img_h-TITLE_H-8,(255,255,255))
+        rb(PAD-10,TITLE_H+4,img_w-PAD*2+20,img_h-TITLE_H-8,(200,200,200),1)
+
+        cy = TITLE_H+50+BOX_H//2
+
+        # element positions
+        elems=[]
+        x=PAD+BUBBLE//2; elems.append(('in',x))
+        x+=BUBBLE//2+GAP
+        for i in range(n_hidden):
+            elems.append(('hid',x+BOX_W//2,i+1)); x+=BOX_W+GAP
+        elems.append(('out',x+BOX_W//2)); x+=BOX_W+GAP
+        elems.append(('ob',x+BUBBLE//2))
+
+        # connectors
+        for i in range(len(elems)-1):
+            e1,e2=elems[i],elems[i+1]
+            x1=e1[1]+(BUBBLE//2 if e1[0] in ('in','ob') else BOX_W//2)
+            x2=e2[1]-(BUBBLE//2 if e2[0] in ('in','ob') else BOX_W//2)
+            dot(x1,cy,4); arrow(cy,x1+4,x2); dot(x2,cy,4)
+
+        COLS={'in':((110,224,112),(46,170,46),(26,122,26)),
+              'hid':((126,200,227),(58,158,192),(30,110,144)),
+              'out':((195,155,211),(125,60,152),(91,44,111)),
+              'ob':((241,148,138),(233,30,140),(169,50,38))}
+
+        for elem in elems:
+            et=elem[0]; ecx=elem[1]
+            ct,cb,cbrd=COLS[et]
+            if et in ('in','ob'):
+                bx=ecx-BUBBLE//2; by=cy-BUBBLE//2
+                fg(bx,by,BUBBLE,BUBBLE,ct,cb); rb(bx,by,BUBBLE,BUBBLE,cbrd,2)
+                num=n_in if et=='in' else n_out
+                fr(ecx-8,cy-10,16,20,(255,255,255))
+            elif et=='hid':
+                bx=ecx-BOX_W//2; by=cy-BOX_H//2
+                fg(bx,by,BOX_W,BOX_H,ct,cb); rb(bx,by,BOX_W,BOX_H,cbrd,2)
+                wb_internals(ecx,cy)
+            elif et=='out':
+                bx=ecx-BOX_W//2; by=cy-BOX_H//2
+                fg(bx,by,BOX_W,BOX_H,ct,cb); rb(bx,by,BOX_W,BOX_H,cbrd,2)
+                wb_internals(ecx,cy)
+
+        # encode PNG
+        def chunk(name,data):
+            c=zlib.crc32(name+data)&0xffffffff
+            return struct.pack('>I',len(data))+name+data+struct.pack('>I',c)
+        rows=[]
+        for row in px:
+            rows.append(b'\x00'+bytes([v for p in row for v in p]))
+        ihdr=struct.pack('>IIBBBBB',img_w,img_h,8,2,0,0,0)
+        png=(b'\x89PNG\r\n\x1a\n'
+             +chunk(b'IHDR',ihdr)
+             +chunk(b'IDAT',zlib.compress(b''.join(rows),6))
+             +chunk(b'IEND',b''))
+        return png, img_w, img_h
+
+    hl_v  = nn_cfg.get('hiddenLayers',1)
+    npl_v = nn_cfg.get('neuronsPerLayer',10)
+    afn_v = nn_cfg.get('activationFn','tansig')
+    ntyp  = nn_cfg.get('networkType','feedforward')
+    nin_v = len(sel_inp) or 3
+    nou_v = len(sel_out) or 2
+    try:
+        from openpyxl.drawing.image import Image as XLImage
+        png_b, dw, dh = _make_nn_png(nin_v, nou_v, hl_v, npl_v, afn_v, ntyp)
+        ws_nn = wb.create_sheet('Network Diagram')
+        ws_nn.merge_cells('A1:P1')
+        ws_nn['A1'].value = 'Neural Network Architecture'
+        ws_nn['A1'].font  = Font(bold=True, color='FFFFFF', size=14)
+        ws_nn['A1'].fill  = PatternFill('solid', fgColor='0F172A')
+        ws_nn['A1'].alignment = CENTER
+        ws_nn.row_dimensions[1].height = 28
+        ws_nn.merge_cells('A2:P2')
+        ws_nn['A2'].value = (f"Plant: {pdata.get('label',pt.upper())}  |  Network: {ntyp.upper()}  |  "
+                             f"Hidden Layers: {hl_v}  |  Neurons/Layer: {npl_v}  |  "
+                             f"Activation: {afn_v}  |  Inputs: {nin_v}  |  Outputs: {nou_v}")
+        ws_nn['A2'].font  = Font(italic=True, color='374151', size=10)
+        ws_nn['A2'].fill  = PatternFill('solid', fgColor='F1F5F9')
+        ws_nn['A2'].alignment = CENTER
+        ws_nn.row_dimensions[2].height = 20
+        n_cols_nn = max(16, dw//60+2)
+        for ci in range(1, n_cols_nn+1):
+            ws_nn.column_dimensions[get_column_letter(ci)].width = 12
+        n_rows_nn = dh//20+2
+        for ri in range(3, n_rows_nn+3):
+            ws_nn.row_dimensions[ri].height = 20
+        xl_img2 = XLImage(io.BytesIO(png_b))
+        xl_img2.width = dw; xl_img2.height = dh
+        xl_img2.anchor = 'A3'
+        ws_nn.add_image(xl_img2)
+        # layer table below image
+        tbl_r = n_rows_nn+5
+        ws_nn.column_dimensions['A'].width=22; ws_nn.column_dimensions['B'].width=28; ws_nn.column_dimensions['C'].width=16
+        set_header_row(ws_nn, tbl_r, ['Layer','Type / Activation','Neurons'])
+        arch_d=[('Input Layer','Input',nin_v)]
+        for li in range(1,hl_v+1): arch_d.append((f'Hidden Layer {li}',afn_v,npl_v))
+        arch_d.append(('Output Layer','purelin',nou_v))
+        lc=['D1FAE5','DBEAFE','DBEAFE','EDE9FE','FCE7F3']
+        for di,(a,b,c) in enumerate(arch_d):
+            r2=tbl_r+1+di
+            for col,val in enumerate([a,b,c],1):
+                cell=ws_nn.cell(r2,col,value=val)
+                cell.border=BORDER; cell.font=Font(size=11,bold=(col==1))
+                cell.alignment=CENTER
+                cell.fill=PatternFill('solid',fgColor=lc[min(di,len(lc)-1)])
+    except Exception as e:
+        logger.error(f'Network diagram error: {e}')
+
     # SHEET 4: Raw Data log
     # ══════════════════════════════════════════════════════════════
     ws4 = wb.create_sheet('Data Log')
@@ -1045,33 +1150,6 @@ def export_excel():
         ws5.add_chart(lc_p, f'{anchor_col}{anchor_row}')
 
     # ══════════════════════════════════════════════════════════════
-    # NETWORK ARCHITECTURE — always create text table
-    # ══════════════════════════════════════════════════════════════
-    if True:
-        ws_na = wb.create_sheet('Network Architecture')
-        ws_na.column_dimensions['A'].width = 22
-        ws_na.column_dimensions['B'].width = 28
-        ws_na.column_dimensions['C'].width = 16
-        ws_na.merge_cells('A1:C1')
-        ws_na['A1'].value = 'Neural Network Architecture'
-        ws_na['A1'].font  = Font(bold=True, color='FFFFFF', size=14)
-        ws_na['A1'].fill  = PatternFill('solid', fgColor='0F172A')
-        ws_na['A1'].alignment = CENTER
-        ws_na.row_dimensions[1].height = 30
-        hl2  = nn_cfg.get('hiddenLayers', 1)
-        npl2 = nn_cfg.get('neuronsPerLayer', 10)
-        set_header_row(ws_na, 2, ['Layer', 'Activation Function', 'Neurons'])
-        arch_rows2 = [('Input Layer', 'Input', len(sel_inp))]
-        for i in range(1, hl2 + 1):
-            arch_rows2.append((f'Hidden Layer {i}', nn_cfg.get('activationFn', 'tansig'), npl2))
-        arch_rows2.append(('Output Layer', 'purelin', len(sel_out)))
-        for i, (a, b, c) in enumerate(arch_rows2, 3):
-            for col, val in enumerate([a, b, c], 1):
-                cell = ws_na.cell(i, col, value=val)
-                cell.border = BORDER
-                cell.font = Font(size=11, bold=(col == 1))
-                cell.alignment = CENTER
-
     # ── Save ──
     buf = io.BytesIO()
     wb.save(buf)
