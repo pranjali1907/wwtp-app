@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>WWTP Simulation & Neural Prediction System</title>
     <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+    <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -1062,18 +1063,125 @@
             document.getElementById('outputDate').textContent = outputDate.toISOString().split('T')[0];
         }
 
+        // ── Parameter ID aliases: maps common column name variants → param id ──
+        const PARAM_ALIASES = {
+            // COD Influent
+            'cod_inf': 'cod_inf', 'cod inf': 'cod_inf', 'cod influent': 'cod_inf', 'cod': 'cod_inf',
+            // BOD Influent
+            'bod_inf': 'bod_inf', 'bod inf': 'bod_inf', 'bod influent': 'bod_inf', 'bod': 'bod_inf',
+            // TSS Influent
+            'tss_inf': 'tss_inf', 'tss inf': 'tss_inf', 'tss influent': 'tss_inf', 'tss': 'tss_inf',
+            // NH3-N Influent
+            'nh3_inf': 'nh3_inf', 'nh3 inf': 'nh3_inf', 'nh3-n influent': 'nh3_inf', 'nh3': 'nh3_inf', 'nh3-n': 'nh3_inf',
+            // Flow Rate
+            'flow': 'flow', 'flow rate': 'flow', 'flow_rate': 'flow',
+            // Dissolved Oxygen
+            'do': 'do', 'dissolved oxygen': 'do', 'dissolved_oxygen': 'do',
+            // MLSS
+            'mlss': 'mlss',
+            // Sludge Age / SRT
+            'sludge_age': 'sludge_age', 'sludge age': 'sludge_age', 'srt': 'srt',
+            // MBR
+            'tmp': 'tmp', 'transmembrane pressure': 'tmp', 'transmembrane_pressure': 'tmp',
+            'flux': 'flux', 'membrane flux': 'flux', 'membrane_flux': 'flux',
+            // SBR
+            'cycle_time': 'cycle_time', 'cycle time': 'cycle_time',
+            'fill_time': 'fill_time', 'fill time': 'fill_time',
+            'react_time': 'react_time', 'react time': 'react_time',
+            // MLE
+            'tn_inf': 'tn_inf', 'tn inf': 'tn_inf', 'total nitrogen': 'tn_inf',
+            'internal_recycle': 'internal_recycle', 'internal recycle': 'internal_recycle', 'internal recycle ratio': 'internal_recycle',
+            'sludge_recycle': 'sludge_recycle', 'sludge recycle': 'sludge_recycle', 'sludge recycle ratio': 'sludge_recycle',
+            // Bardenpho
+            'tp_inf': 'tp_inf', 'tp inf': 'tp_inf', 'total phosphorus': 'tp_inf',
+            'stages': 'stages', 'anoxic stages': 'stages',
+            'anaerobic_hrt': 'anaerobic_hrt', 'anaerobic hrt': 'anaerobic_hrt',
+        };
+
+        function normalizeHeader(h) {
+            return h.trim().toLowerCase().replace(/\s*\(.*?\)/g, '').replace(/[-\/]/g, ' ').replace(/\s+/g, ' ').trim();
+        }
+
+        function applyRowToParams(headers, values) {
+            let matched = 0;
+            headers.forEach((h, i) => {
+                const key = normalizeHeader(h);
+                const paramId = PARAM_ALIASES[key];
+                if (!paramId) return;
+                const el = document.getElementById(`val_${paramId}`);
+                if (el && values[i] !== undefined && values[i] !== '') {
+                    const num = parseFloat(values[i]);
+                    if (!isNaN(num)) { el.value = num; matched++; }
+                }
+            });
+            return matched;
+        }
+
+        function showUploadSuccess(fileName, fileSize, matched, total) {
+            const zone = document.getElementById('uploadZone');
+            const pct = total ? Math.round(matched / total * 100) : 0;
+            zone.innerHTML = `
+                <div class="upload-icon">✅</div>
+                <h3 style="color:#1e3a8a;">${fileName}</h3>
+                <p style="color:#6b7280;margin-top:6px;">${(fileSize/1024).toFixed(1)} KB &nbsp;·&nbsp; Click to change file</p>
+                <p style="margin-top:8px;font-weight:600;color:${matched>0?'#065f46':'#92400e'};">
+                    ${matched > 0
+                        ? `✔ ${matched} / ${total} parameters matched (${pct}%)`
+                        : '⚠ No matching parameter columns found — check column headers'}
+                </p>
+                <input type="file" id="fileInput" style="display:none;" accept=".xlsx,.xls,.csv" onchange="handleFileUpload(event)">
+            `;
+        }
+
         function handleFileUpload(event) {
             const file = event.target.files[0];
-            if (file) {
-                const zone = document.getElementById('uploadZone');
-                zone.innerHTML = `
-                    <div class="upload-icon">✅</div>
-                    <h3 style="color: #1e3a8a;">${file.name}</h3>
-                    <p style="color: #6b7280; margin-top: 10px;">
-                        ${(file.size / 1024).toFixed(1)} KB &nbsp;·&nbsp; Click to change file
-                    </p>
-                    <input type="file" id="fileInput" style="display: none;" accept=".xlsx,.xls,.csv" onchange="handleFileUpload(event)">
-                `;
+            if (!file) return;
+
+            const ext = file.name.split('.').pop().toLowerCase();
+            const reader = new FileReader();
+
+            if (ext === 'csv') {
+                // ── CSV path ──────────────────────────────────────────
+                reader.onload = function(e) {
+                    const text = e.target.result;
+                    const lines = text.split(/\r?\n/).filter(l => l.trim());
+                    if (lines.length < 2) {
+                        alert('CSV must have at least a header row and one data row.');
+                        return;
+                    }
+                    const headers = lines[0].split(',');
+                    // Use first data row
+                    const values = lines[1].split(',');
+                    const matched = applyRowToParams(headers, values);
+                    showUploadSuccess(file.name, file.size, matched, currentParams.length);
+                };
+                reader.readAsText(file);
+
+            } else if (ext === 'xlsx' || ext === 'xls') {
+                // ── Excel path — use SheetJS ──────────────────────────
+                reader.onload = function(e) {
+                    try {
+                        const XLSX = window.XLSX;
+                        if (!XLSX) { alert('SheetJS not loaded — please refresh and try again.'); return; }
+                        const data = new Uint8Array(e.target.result);
+                        const wb   = XLSX.read(data, { type: 'array' });
+                        const ws   = wb.Sheets[wb.SheetNames[0]];
+                        const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+                        if (rows.length < 2) {
+                            alert('Excel sheet must have at least a header row and one data row.');
+                            return;
+                        }
+                        const headers = rows[0].map(String);
+                        const values  = rows[1].map(String);
+                        const matched = applyRowToParams(headers, values);
+                        showUploadSuccess(file.name, file.size, matched, currentParams.length);
+                    } catch(err) {
+                        alert('Could not parse Excel file: ' + err.message);
+                    }
+                };
+                reader.readAsArrayBuffer(file);
+            } else {
+                alert('Unsupported file type. Please upload .xlsx, .xls, or .csv.');
             }
         }
 
