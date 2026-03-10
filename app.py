@@ -840,82 +840,191 @@ def export_excel():
     ws3.add_chart(bc2, 'E3')
 
     # ══════════════════════════════════════════════════════════════
-    # SHEET 3 (or 4): Network Diagram image (if provided)
     # ══════════════════════════════════════════════════════════════
-    if nn_img_b64:
-        try:
-            from openpyxl.drawing.image import Image as XLImage
-            from PIL import Image as PILImage
-            img_bytes = base64.b64decode(nn_img_b64.split(',')[-1])
-            img_io = io.BytesIO(img_bytes)
-
-            # Get actual image dimensions to scale properly in Excel
-            pil_img = PILImage.open(io.BytesIO(img_bytes))
-            img_w_px, img_h_px = pil_img.size
-            # Scale to fit nicely — max 900px wide at 96dpi
-            max_w = 900
-            scale = min(1.0, max_w / img_w_px)
-            final_w = int(img_w_px * scale)
-            final_h = int(img_h_px * scale)
-
-            ws_nn = wb.create_sheet('Network Diagram')
-            # Title row
-            ws_nn.merge_cells('A1:L1')
-            ws_nn['A1'].value = 'Neural Network Architecture — Full Diagram'
-            ws_nn['A1'].font  = Font(bold=True, color='FFFFFF', size=14)
-            ws_nn['A1'].fill  = PatternFill('solid', fgColor='0F172A')
-            ws_nn['A1'].alignment = CENTER
-            ws_nn.row_dimensions[1].height = 28
-
-            # Info row
-            ws_nn.merge_cells('A2:L2')
-            ws_nn['A2'].value = f"Plant: {pdata.get('label', pt.upper())}  |  Network: {nn_cfg.get('networkType','feedforward').upper()}  |  Hidden Layers: {nn_cfg.get('hiddenLayers',1)}  |  Neurons/Layer: {nn_cfg.get('neuronsPerLayer',10)}"
-            ws_nn['A2'].font  = Font(italic=True, color='374151', size=10)
-            ws_nn['A2'].fill  = PatternFill('solid', fgColor='F1F5F9')
-            ws_nn['A2'].alignment = CENTER
-            ws_nn.row_dimensions[2].height = 20
-
-            # Expand columns to fit image width (approx 7px per unit)
-            n_cols = max(12, final_w // 60 + 2)
-            for col_i in range(1, n_cols + 1):
-                ws_nn.column_dimensions[get_column_letter(col_i)].width = 12
-
-            # Set row heights so image fits without cropping
-            n_rows = final_h // 20 + 4
-            for row_i in range(3, n_rows + 3):
-                ws_nn.row_dimensions[row_i].height = 20
-
-            xl_img = XLImage(img_io)
-            xl_img.width  = final_w
-            xl_img.height = final_h
-            xl_img.anchor = 'A3'
-            ws_nn.add_image(xl_img)
-        except ImportError:
-            # Pillow not installed — insert image without dimension check
-            try:
-                from openpyxl.drawing.image import Image as XLImage
-                img_bytes = base64.b64decode(nn_img_b64.split(',')[-1])
-                img_io = io.BytesIO(img_bytes)
-                ws_nn = wb.create_sheet('Network Diagram')
-                ws_nn.merge_cells('A1:L1')
-                ws_nn['A1'].value = 'Neural Network Architecture — Full Diagram'
-                ws_nn['A1'].font  = Font(bold=True, color='FFFFFF', size=14)
-                ws_nn['A1'].fill  = PatternFill('solid', fgColor='0F172A')
-                ws_nn['A1'].alignment = CENTER
-                # Set generous column widths
-                for col_i in range(1, 20):
-                    ws_nn.column_dimensions[get_column_letter(col_i)].width = 12
-                for row_i in range(2, 60):
-                    ws_nn.row_dimensions[row_i].height = 20
-                xl_img = XLImage(img_io)
-                xl_img.anchor = 'A2'
-                ws_nn.add_image(xl_img)
-            except Exception:
-                pass
-        except Exception:
-            pass
-
+    # NETWORK DIAGRAM — Excel cells styled like Image 2 (no PIL needed)
     # ══════════════════════════════════════════════════════════════
+    hl_v  = nn_cfg.get('hiddenLayers', 1)
+    npl_v = nn_cfg.get('neuronsPerLayer', 10)
+    afn_v = nn_cfg.get('activationFn', 'tansig')
+    ntyp  = nn_cfg.get('networkType', 'feedforward')
+    nin_v = len(sel_inp) or 3
+    nou_v = len(sel_out) or 2
+
+    ws_nn = wb.create_sheet('Network Diagram')
+
+    # ── colour palette (matching Image 2) ──
+    C_TITLE   = '0D1B2A'   # near-black title bar
+    C_INFO    = 'F1F5F9'
+    C_INPUT_H = '22C55E'   # green header
+    C_INPUT_B = '16A34A'   # green body
+    C_HID_H   = '38BDF8'   # blue header
+    C_HID_B   = '7DD3FC'   # light blue body
+    C_OUT_H   = 'A855F7'   # purple header
+    C_OUT_B   = 'D8B4FE'   # light purple body
+    C_WB      = 'F8FAFC'   # near-white for W/b cells
+    C_PHI     = 'E0F2FE'   # light blue for ⊕ cell
+    C_FN      = 'DBEAFE'   # very light blue for f(·) cell
+    C_SM      = 'EDE9FE'   # light purple for softmax
+    C_CONN    = 'CBD5E1'   # connector background
+    C_BLACK   = '000000'
+    C_WHITE   = 'FFFFFF'
+
+    def _cell(ws, row, col, val='', fg=None, font_color='000000',
+              bold=False, size=10, align='center', border=True, h=None):
+        c = ws.cell(row, col, value=val)
+        if fg: c.fill = PatternFill('solid', fgColor=fg)
+        c.font = Font(bold=bold, color=font_color, size=size,
+                      name='Segoe UI' if bold else 'Calibri')
+        c.alignment = Alignment(horizontal=align, vertical='center',
+                                wrap_text=False)
+        if border:
+            s = Side(style='thin', color='CBD5E1')
+            c.border = Border(left=s, right=s, top=s, bottom=s)
+        return c
+
+    # ── worksheet column widths ──
+    # Layout: col1=label gap | then per element: [3 cols box] [1 col gap]
+    # Elements: INPUT(1) | hidden(hl_v) | OUTPUT(1) | final bubble(1)
+    n_elems = 1 + hl_v + 1 + 1   # input + hiddens + output + bubble
+
+    ROW_TITLE   = 1
+    ROW_INFO    = 2
+    ROW_EMPTY1  = 3
+    ROW_LABEL   = 4   # "INPUT" / "HIDDEN 1" labels
+    ROW_BOX_T   = 5   # top of box (W/b row)
+    ROW_BOX_M   = 6   # ⊕ row
+    ROW_BOX_B   = 7   # f(·) / softmax row
+    ROW_EMPTY2  = 8
+    ROW_COUNT   = 9   # "5 nodes" / "10 neurons"
+    TOTAL_ROWS  = 10
+
+    # title & info spanning all cols
+    total_cols = n_elems * 4   # 4 cols per element (3 box + 1 gap)
+    last_col   = get_column_letter(total_cols + 1)
+
+    ws_nn.merge_cells(f'A{ROW_TITLE}:{last_col}{ROW_TITLE}')
+    ws_nn[f'A{ROW_TITLE}'].value = f'{ntyp.upper()} Neural Network  —  Architecture View'
+    ws_nn[f'A{ROW_TITLE}'].font  = Font(bold=True, color=C_WHITE, size=14, name='Segoe UI')
+    ws_nn[f'A{ROW_TITLE}'].fill  = PatternFill('solid', fgColor=C_TITLE)
+    ws_nn[f'A{ROW_TITLE}'].alignment = Alignment(horizontal='center', vertical='center')
+    ws_nn.row_dimensions[ROW_TITLE].height = 32
+
+    ws_nn.merge_cells(f'A{ROW_INFO}:{last_col}{ROW_INFO}')
+    ws_nn[f'A{ROW_INFO}'].value = (f"M  {ntyp.upper()} Neural Network (view)  |  "
+                                    f"Plant: {pdata.get('label',pt.upper())}  |  "
+                                    f"Layers: {hl_v}×{npl_v}  |  "
+                                    f"Activation: {afn_v}  |  "
+                                    f"Inputs: {nin_v}   Outputs: {nou_v}")
+    ws_nn[f'A{ROW_INFO}'].font  = Font(size=9, color='374151', name='Segoe UI')
+    ws_nn[f'A{ROW_INFO}'].fill  = PatternFill('solid', fgColor=C_INFO)
+    ws_nn[f'A{ROW_INFO}'].alignment = Alignment(horizontal='left', vertical='center')
+    ws_nn.row_dimensions[ROW_INFO].height = 20
+    ws_nn.row_dimensions[ROW_EMPTY1].height = 12
+    ws_nn.row_dimensions[ROW_LABEL].height  = 22
+    ws_nn.row_dimensions[ROW_BOX_T].height  = 28
+    ws_nn.row_dimensions[ROW_BOX_M].height  = 32
+    ws_nn.row_dimensions[ROW_BOX_B].height  = 28
+    ws_nn.row_dimensions[ROW_EMPTY2].height = 8
+    ws_nn.row_dimensions[ROW_COUNT].height  = 20
+
+    def draw_element(col_start, etype, label, h_col, b_col, count_label, fn_label='f(·)'):
+        c1,c2,c3 = col_start, col_start+1, col_start+2
+        lc = get_column_letter
+        # label row
+        ws_nn.merge_cells(f'{lc(c1)}{ROW_LABEL}:{lc(c3)}{ROW_LABEL}')
+        _cell(ws_nn, ROW_LABEL, c1, label, fg=None,
+              font_color='1E3A8A' if 'HIDDEN' in label or 'OUTPUT' in label else '166534',
+              bold=True, size=11, border=False)
+        # col widths
+        for c in [c1,c2,c3]:
+            ws_nn.column_dimensions[lc(c)].width = 5
+        if etype == 'input':
+            # big green merged cell
+            ws_nn.merge_cells(f'{lc(c1)}{ROW_BOX_T}:{lc(c3)}{ROW_BOX_B}')
+            cell = ws_nn.cell(ROW_BOX_T, c1, value=str(nin_v))
+            cell.fill = PatternFill('solid', fgColor=C_INPUT_B)
+            cell.font = Font(bold=True, size=22, color=C_WHITE, name='Segoe UI')
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+            s = Side(style='medium', color=C_INPUT_H)
+            cell.border = Border(left=s, right=s, top=s, bottom=s)
+        elif etype == 'bubble':
+            ws_nn.merge_cells(f'{lc(c1)}{ROW_BOX_T}:{lc(c3)}{ROW_BOX_B}')
+            cell = ws_nn.cell(ROW_BOX_T, c1, value=str(nou_v))
+            cell.fill = PatternFill('solid', fgColor='EC4899')
+            cell.font = Font(bold=True, size=22, color=C_WHITE, name='Segoe UI')
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+            s = Side(style='medium', color='BE185D')
+            cell.border = Border(left=s, right=s, top=s, bottom=s)
+        else:
+            # W | b row
+            _cell(ws_nn, ROW_BOX_T, c1, 'W', fg=C_WB, bold=True, size=11)
+            _cell(ws_nn, ROW_BOX_T, c2, '',  fg=h_col)
+            _cell(ws_nn, ROW_BOX_T, c3, 'b', fg=C_WB, bold=True, size=11)
+            # ⊕ row
+            ws_nn.merge_cells(f'{lc(c1)}{ROW_BOX_M}:{lc(c3)}{ROW_BOX_M}')
+            phcell = ws_nn.cell(ROW_BOX_M, c1, value='⊕')
+            phcell.fill = PatternFill('solid', fgColor=b_col)
+            phcell.font = Font(bold=True, size=18, color=C_WHITE, name='Segoe UI')
+            phcell.alignment = Alignment(horizontal='center', vertical='center')
+            s = Side(style='thin', color='94A3B8')
+            phcell.border = Border(left=s, right=s, top=s, bottom=s)
+            # f(·) / softmax row
+            ws_nn.merge_cells(f'{lc(c1)}{ROW_BOX_B}:{lc(c3)}{ROW_BOX_B}')
+            fn_bg = C_SM if etype=='output' else C_FN
+            fncell = ws_nn.cell(ROW_BOX_B, c1, value=fn_label)
+            fncell.fill = PatternFill('solid', fgColor=fn_bg)
+            fncell.font = Font(bold=False, size=9, color='1E40AF', name='Segoe UI')
+            fncell.alignment = Alignment(horizontal='center', vertical='center')
+            s = Side(style='thin', color='94A3B8')
+            fncell.border = Border(left=s, right=s, top=s, bottom=s)
+            # outer border around box
+            for r in [ROW_BOX_T, ROW_BOX_M, ROW_BOX_B]:
+                for c in [c1, c3]:
+                    existing = ws_nn.cell(r, c).border
+                    ws_nn.cell(r, c).border = Border(
+                        left=Side(style='medium', color='64748B') if c==c1 else existing.left,
+                        right=Side(style='medium', color='64748B') if c==c3 else existing.right,
+                        top=existing.top, bottom=existing.bottom)
+        # count label
+        ws_nn.merge_cells(f'{lc(c1)}{ROW_COUNT}:{lc(c3)}{ROW_COUNT}')
+        _cell(ws_nn, ROW_COUNT, c1, count_label, fg=None,
+              font_color='6B7280', bold=False, size=9, border=False)
+
+    def draw_connector(col_start):
+        lc = get_column_letter
+        c = ws_nn.cell(ROW_BOX_M, col_start)
+        c.value = '•——▶•'
+        c.font  = Font(size=9, color='64748B', name='Segoe UI')
+        c.alignment = Alignment(horizontal='center', vertical='center')
+        c.fill = PatternFill('solid', fgColor='F8FAFC')
+        ws_nn.column_dimensions[lc(col_start)].width = 6
+
+    # ── draw all elements ──
+    col = 1
+
+    # INPUT
+    draw_element(col, 'input', 'INPUT', C_INPUT_H, C_INPUT_B,
+                 f'{nin_v} nodes')
+    col += 3
+    draw_connector(col); col += 1
+
+    # HIDDEN layers
+    for h in range(1, hl_v+1):
+        draw_element(col, 'hidden', f'HIDDEN {h}', C_HID_H, C_HID_B,
+                     f'{npl_v} neurons', fn_label=f'f(·)')
+        col += 3
+        draw_connector(col); col += 1
+
+    # OUTPUT box
+    draw_element(col, 'output', 'OUTPUT', C_OUT_H, C_OUT_B,
+                 f'{nou_v} outputs', fn_label='softmax')
+    col += 3
+    draw_connector(col); col += 1
+
+    # Final output bubble
+    draw_element(col, 'bubble', 'OUTPUT', 'EC4899', 'EC4899',
+                 f'{nou_v} classes')
+
     # SHEET 4: Raw Data log
     # ══════════════════════════════════════════════════════════════
     ws4 = wb.create_sheet('Data Log')
@@ -1020,58 +1129,41 @@ def export_excel():
 
         ws5.row_dimensions[row_n].height = 20
 
-    # One chart per output parameter
+    # One chart per output parameter — single line, dots, proper axes (like Image 3)
     CHART_COLORS = ['3B82F6','EF4444','10B981','F59E0B','8B5CF6','EC4899','14B8A6','F97316']
     charts_start_row = horizon + 6
-    charts_per_row = 2
-    chart_w = 18; chart_h = 14
+    chart_w = 22; chart_h = 15
     cats_daily = Reference(ws5, min_col=1, min_row=3, max_row=horizon + 3)
     for p_idx, res_row in enumerate(results):
         lc_p = LineChart()
-        lc_p.title  = f'{res_row["parameter"]} — Daily Trend'
-        lc_p.style  = 10
-        lc_p.y_axis.title = f'{res_row["parameter"]} ({res_row["unit"]})'
-        lc_p.x_axis.title = 'Date'
-        lc_p.width  = chart_w; lc_p.height = chart_h
+        lc_p.title  = f'{res_row["parameter"]} — {horizon}-Day Trend'
+        lc_p.style  = 2   # clean white style
+        lc_p.y_axis.title   = f'Value ({res_row["unit"]})'
+        lc_p.y_axis.numFmt  = '0.0000'
+        lc_p.x_axis.title   = 'Date'
+        lc_p.x_axis.numFmt  = 'dd MMM yyyy'
+        lc_p.x_axis.tickLblPos = 'low'
+        lc_p.width  = chart_w
+        lc_p.height = chart_h
         data_p = Reference(ws5, min_col=p_idx + 2, min_row=2, max_row=horizon + 3)
         lc_p.add_data(data_p, titles_from_data=True)
         lc_p.set_categories(cats_daily)
-        lc_p.series[0].graphicalProperties.line.solidFill = CHART_COLORS[p_idx % len(CHART_COLORS)]
-        col_pos  = (p_idx % charts_per_row)
-        row_pos  = (p_idx // charts_per_row)
-        # Each chart ~14 rows tall; place in 2-column grid
-        anchor_col = get_column_letter(col_pos * 8 + 1)
-        anchor_row = charts_start_row + row_pos * 22
+        s = lc_p.series[0]
+        col_hex = CHART_COLORS[p_idx % len(CHART_COLORS)]
+        s.graphicalProperties.line.solidFill   = col_hex
+        s.graphicalProperties.line.width       = 25000   # ~2.7pt thick line
+        # add data point markers (dots like Image 3)
+        s.marker.symbol   = 'circle'
+        s.marker.size     = 5
+        s.marker.graphicalProperties.fgColor   = col_hex
+        s.marker.graphicalProperties.solidFill = col_hex
+        col_pos   = (p_idx % 2)
+        row_pos   = (p_idx // 2)
+        anchor_col = get_column_letter(col_pos * 12 + 1)
+        anchor_row = charts_start_row + row_pos * 26
         ws5.add_chart(lc_p, f'{anchor_col}{anchor_row}')
 
     # ══════════════════════════════════════════════════════════════
-    # NETWORK ARCHITECTURE — always create text table
-    # ══════════════════════════════════════════════════════════════
-    if True:
-        ws_na = wb.create_sheet('Network Architecture')
-        ws_na.column_dimensions['A'].width = 22
-        ws_na.column_dimensions['B'].width = 28
-        ws_na.column_dimensions['C'].width = 16
-        ws_na.merge_cells('A1:C1')
-        ws_na['A1'].value = 'Neural Network Architecture'
-        ws_na['A1'].font  = Font(bold=True, color='FFFFFF', size=14)
-        ws_na['A1'].fill  = PatternFill('solid', fgColor='0F172A')
-        ws_na['A1'].alignment = CENTER
-        ws_na.row_dimensions[1].height = 30
-        hl2  = nn_cfg.get('hiddenLayers', 1)
-        npl2 = nn_cfg.get('neuronsPerLayer', 10)
-        set_header_row(ws_na, 2, ['Layer', 'Activation Function', 'Neurons'])
-        arch_rows2 = [('Input Layer', 'Input', len(sel_inp))]
-        for i in range(1, hl2 + 1):
-            arch_rows2.append((f'Hidden Layer {i}', nn_cfg.get('activationFn', 'tansig'), npl2))
-        arch_rows2.append(('Output Layer', 'purelin', len(sel_out)))
-        for i, (a, b, c) in enumerate(arch_rows2, 3):
-            for col, val in enumerate([a, b, c], 1):
-                cell = ws_na.cell(i, col, value=val)
-                cell.border = BORDER
-                cell.font = Font(size=11, bold=(col == 1))
-                cell.alignment = CENTER
-
     # ── Save ──
     buf = io.BytesIO()
     wb.save(buf)
