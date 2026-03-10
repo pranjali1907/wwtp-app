@@ -1123,7 +1123,7 @@
             };
         }
 
-        // ── draw MATLAB-style network diagram on canvas ──
+        // ── draw network diagram directly on canvas (reliable, no html2canvas) ──
         async function captureNetworkDiagram() {
             try {
                 const cfg = getNNConfig();
@@ -1132,235 +1132,162 @@
                 const networkType    = cfg.networkType     || 'feedforward';
                 const activationFn   = cfg.activationFn   || 'tansig';
 
+                // count selected inputs/outputs
                 const nIn  = getSelectedInputIds().length  || 3;
                 const nOut = getSelectedOutputIdxs().length|| 2;
 
-                // layout constants — exactly matching screenshot
-                const BOX_W = 90, BOX_H = 110;
-                const BUBBLE = 46;           // square side for input/output bubbles
-                const GAP    = 90;           // gap between elements
-                const PAD    = 50;
-                // total elements: bubble + gap + [hidden boxes + gap]* + output box + gap + bubble
-                const totalLayers = 2 + hiddenLayers; // hidden count + output box
-                const cw = PAD*2 + BUBBLE + GAP + (hiddenLayers*(BOX_W+GAP)) + BOX_W + GAP + BUBBLE + PAD;
-                const ch    = 320;
+                const totalLayers = 2 + hiddenLayers; // input + hidden(s) + output
+                const PAD   = 60;
+                const cw    = Math.max(900, totalLayers * 160 + PAD * 2);
+                const ch    = 420;
 
                 const canvas = document.createElement('canvas');
-                canvas.width  = cw * 2;
+                canvas.width  = cw * 2;   // 2x for retina
                 canvas.height = ch * 2;
                 const ctx = canvas.getContext('2d');
                 ctx.scale(2, 2);
 
-                const cy = ch / 2 + 20;  // vertical center of boxes
-
-                // ── WHITE background with light border (like screenshot) ──
-                ctx.fillStyle = '#f0f0f0';
+                // ── background ──
+                ctx.fillStyle = '#e8e8e8';
                 ctx.fillRect(0, 0, cw, ch);
-                ctx.fillStyle = '#ffffff';
-                ctx.strokeStyle = '#cccccc'; ctx.lineWidth = 1;
-                ctx.fillRect(PAD-10, 50, cw-PAD*2+20, ch-60);
-                ctx.strokeRect(PAD-10, 50, cw-PAD*2+20, ch-60);
 
-                // ── TITLE BAR — exactly like MATLAB (grey gradient, M icon) ──
-                const tg = ctx.createLinearGradient(0,0,0,34);
-                tg.addColorStop(0,'#ececec'); tg.addColorStop(1,'#d0d0d0');
-                ctx.fillStyle = tg;
-                ctx.fillRect(0, 0, cw, 34);
-                ctx.strokeStyle='#aaa'; ctx.lineWidth=1;
-                ctx.strokeRect(0, 0, cw, 34);
-                // M icon (orange square)
-                ctx.fillStyle='#e05a00';
-                ctx.fillRect(10, 8, 18, 18);
-                ctx.fillStyle='#fff'; ctx.font='bold 12px Arial';
-                ctx.textAlign='center'; ctx.textBaseline='middle';
-                ctx.fillText('M', 19, 17);
-                // title text
-                ctx.fillStyle='#222'; ctx.font='13px Segoe UI,Arial';
-                ctx.textAlign='left';
-                const titleMap = {
-                    feedforward:'Feed Forward Neural Network (view)',
+                // ── title bar ──
+                const grad = ctx.createLinearGradient(0,0,0,36);
+                grad.addColorStop(0,'#e0e0e0'); grad.addColorStop(1,'#c0c0c0');
+                ctx.fillStyle = grad;
+                ctx.fillRect(PAD-20, 12, cw - PAD*2 + 40, 36);
+                ctx.strokeStyle='#999'; ctx.lineWidth=1;
+                ctx.strokeRect(PAD-20, 12, cw - PAD*2 + 40, 36);
+                ctx.fillStyle='#333'; ctx.font='bold 13px Segoe UI,Arial';
+                ctx.textAlign='left'; ctx.textBaseline='middle';
+                const titles = {feedforward:'Feed Forward Neural Network (view)',
                     patternrecognition:'Pattern Recognition Neural Network (view)',
                     fitting:'Fitting Neural Network (view)',
                     lstm:'LSTM Neural Network (view)',
-                    gru:'GRU Neural Network (view)',
-                    cnn:'CNN Neural Network (view)'
-                };
-                ctx.fillText(titleMap[networkType]||'Neural Network (view)', 36, 17);
+                    gru:'GRU Neural Network (view)',cnn:'CNN Neural Network (view)'};
+                ctx.fillText(titles[networkType]||'Neural Network (view)', PAD, 30);
 
-                // ── helper: draw connector (dot — line —▶ dot) ──
-                function drawConnector(x1, x2, y) {
-                    ctx.strokeStyle='#555'; ctx.lineWidth=1.5;
-                    // left dot
-                    ctx.fillStyle='#555';
-                    ctx.beginPath(); ctx.arc(x1,y,3.5,0,Math.PI*2); ctx.fill();
-                    // line
-                    ctx.beginPath(); ctx.moveTo(x1+3.5,y); ctx.lineTo(x2-10,y); ctx.stroke();
-                    // arrowhead
-                    ctx.beginPath();
-                    ctx.moveTo(x2-10,y-5); ctx.lineTo(x2,y); ctx.lineTo(x2-10,y+5);
-                    ctx.closePath(); ctx.fill();
-                    // right dot
-                    ctx.beginPath(); ctx.arc(x2,y,3.5,0,Math.PI*2); ctx.fill();
-                }
-
-                // ── helper: draw W/b boxes + ⊕ + fn label inside a box ──
-                function drawInternals(cx, cy2, fnLabel, boxColor) {
-                    // W box
-                    ctx.fillStyle='rgba(255,255,255,0.85)';
-                    ctx.fillRect(cx-24, cy2-28, 20, 18);
-                    ctx.strokeStyle='rgba(0,0,0,0.25)'; ctx.lineWidth=0.8;
-                    ctx.strokeRect(cx-24, cy2-28, 20, 18);
-                    ctx.fillStyle='#111'; ctx.font='bold 10px Arial';
-                    ctx.textAlign='center'; ctx.textBaseline='middle';
-                    ctx.fillText('W', cx-14, cy2-19);
-                    // b box
-                    ctx.fillStyle='rgba(255,255,255,0.85)';
-                    ctx.fillRect(cx+4, cy2-28, 20, 18);
-                    ctx.strokeStyle='rgba(0,0,0,0.25)'; ctx.lineWidth=0.8;
-                    ctx.strokeRect(cx+4, cy2-28, 20, 18);
-                    ctx.fillStyle='#111'; ctx.font='bold 10px Arial';
-                    ctx.textAlign='center';
-                    ctx.fillText('b', cx+14, cy2-19);
-                    // ⊕ circle
-                    ctx.strokeStyle='rgba(255,255,255,0.7)'; ctx.lineWidth=1.5;
-                    ctx.beginPath(); ctx.arc(cx, cy2, 11, 0, Math.PI*2); ctx.stroke();
-                    ctx.fillStyle='rgba(255,255,255,0.15)';
-                    ctx.beginPath(); ctx.arc(cx, cy2, 11, 0, Math.PI*2); ctx.fill();
-                    ctx.fillStyle='#fff'; ctx.font='15px Arial';
-                    ctx.textAlign='center'; ctx.textBaseline='middle';
-                    ctx.fillText('⊕', cx, cy2+1);
-                    // fn label
-                    ctx.fillStyle='rgba(255,255,255,0.9)'; ctx.font='bold 9px Arial';
-                    ctx.fillText(fnLabel, cx, cy2+24);
-                }
-
-                // ── helper: draw a rounded rect ──
-                function rr(x,y,w,h,r){
-                    ctx.beginPath();
-                    ctx.moveTo(x+r,y);
-                    ctx.lineTo(x+w-r,y); ctx.arcTo(x+w,y,x+w,y+r,r);
-                    ctx.lineTo(x+w,y+h-r); ctx.arcTo(x+w,y+h,x+w-r,y+h,r);
-                    ctx.lineTo(x+r,y+h); ctx.arcTo(x,y+h,x,y+h-r,r);
-                    ctx.lineTo(x,y+r); ctx.arcTo(x,y,x+r,y,r);
-                    ctx.closePath();
-                }
-
-                // ── compute x positions of each element ──
-                // elements: [inputBubble, hidden1, hidden2, ..., outputBox, outputBubble]
-                let xPositions = [];
-                let x = PAD + BUBBLE/2;
-                xPositions.push({type:'input', cx: x});
-                x += BUBBLE/2 + GAP;
+                // ── layer definitions ──
+                const layers = [];
+                layers.push({label:'Input', neurons: nIn, color:'#4FC3F7', dark:'#0288D1'});
                 for(let i=0;i<hiddenLayers;i++){
-                    xPositions.push({type:'hidden', idx:i+1, cx: x + BOX_W/2});
-                    x += BOX_W + GAP;
+                    layers.push({label:'Hidden '+(i+1), neurons: neuronsPerLayer,
+                        color:'#81C784', dark:'#388E3C', fn: activationFn});
                 }
-                xPositions.push({type:'output', cx: x + BOX_W/2});
-                x += BOX_W + GAP;
-                xPositions.push({type:'outbubble', cx: x + BUBBLE/2});
+                layers.push({label:'Output', neurons: nOut, color:'#FF8A65', dark:'#E64A19'});
 
-                // ── draw connectors (all behind boxes) ──
-                for(let i=0;i<xPositions.length-1;i++){
-                    const el1 = xPositions[i], el2 = xPositions[i+1];
-                    let x1, x2;
-                    if(el1.type==='input')      x1 = el1.cx + BUBBLE/2;
-                    else if(el1.type==='outbubble') x1 = el1.cx + BUBBLE/2;
-                    else                           x1 = el1.cx + BOX_W/2;
-                    if(el2.type==='outbubble')  x2 = el2.cx - BUBBLE/2;
-                    else if(el2.type==='input') x2 = el2.cx - BUBBLE/2;
-                    else                        x2 = el2.cx - BOX_W/2;
-                    drawConnector(x1, x2, cy);
+                const usableW = cw - PAD*2;
+                const spacing = usableW / (layers.length - 1);
+                const centerY = (ch + 60) / 2;
+                const BOX_W=90, BOX_H=130;
+
+                const boxCenters = [];
+
+                // ── draw connectors first (behind boxes) ──
+                for(let i=0;i<layers.length-1;i++){
+                    const x1 = PAD + i * spacing + BOX_W/2;
+                    const x2 = PAD + (i+1) * spacing - BOX_W/2;
+                    const y  = centerY;
+                    // draw arrow line
+                    ctx.strokeStyle='#777'; ctx.lineWidth=2;
+                    ctx.beginPath(); ctx.moveTo(x1, y); ctx.lineTo(x2-10, y); ctx.stroke();
+                    // arrowhead
+                    ctx.fillStyle='#777';
+                    ctx.beginPath();
+                    ctx.moveTo(x2-10, y-6); ctx.lineTo(x2, y); ctx.lineTo(x2-10, y+6);
+                    ctx.closePath(); ctx.fill();
+                    // dots
+                    ctx.fillStyle='#555';
+                    ctx.beginPath(); ctx.arc(x1,y,4,0,Math.PI*2); ctx.fill();
+                    ctx.beginPath(); ctx.arc(x2,y,4,0,Math.PI*2); ctx.fill();
                 }
 
-                // ── draw each element ──
-                for(let i=0;i<xPositions.length;i++){
-                    const el = xPositions[i];
+                // ── draw layer boxes ──
+                for(let i=0;i<layers.length;i++){
+                    const lyr = layers[i];
+                    const cx2  = PAD + i * spacing;
+                    const bx  = cx2 - BOX_W/2;
+                    const by  = centerY - BOX_H/2;
+                    boxCenters.push({x:cx2, y:centerY});
 
-                    if(el.type==='input'){
-                        // GREEN square — exactly like screenshot
-                        ctx.shadowColor='rgba(0,0,0,0.18)'; ctx.shadowBlur=5; ctx.shadowOffsetX=2; ctx.shadowOffsetY=2;
-                        const ig = ctx.createLinearGradient(el.cx-BUBBLE/2, cy-BUBBLE/2, el.cx-BUBBLE/2, cy+BUBBLE/2);
-                        ig.addColorStop(0,'#6EE070'); ig.addColorStop(1,'#2EAA2E');
-                        ctx.fillStyle = ig;
-                        rr(el.cx-BUBBLE/2, cy-BUBBLE/2, BUBBLE, BUBBLE, 6);
-                        ctx.fill();
-                        ctx.shadowColor='transparent'; ctx.shadowBlur=0;
-                        ctx.strokeStyle='#1A7A1A'; ctx.lineWidth=2;
-                        rr(el.cx-BUBBLE/2, cy-BUBBLE/2, BUBBLE, BUBBLE, 6); ctx.stroke();
-                        // number
-                        ctx.fillStyle='#fff'; ctx.font='bold 20px Arial';
-                        ctx.textAlign='center'; ctx.textBaseline='middle';
-                        ctx.fillText(nIn, el.cx, cy);
-                        // label above
-                        ctx.fillStyle='#222'; ctx.font='bold 12px Arial';
-                        ctx.fillText('INPUT', el.cx, cy - BUBBLE/2 - 14);
-                        // label below
-                        ctx.fillStyle='#555'; ctx.font='11px Arial';
-                        ctx.fillText(nIn+' nodes', el.cx, cy + BUBBLE/2 + 14);
+                    // shadow
+                    ctx.shadowColor='rgba(0,0,0,0.2)'; ctx.shadowBlur=6; ctx.shadowOffsetX=2; ctx.shadowOffsetY=2;
 
-                    } else if(el.type==='hidden'){
-                        // BLUE box — like screenshot
-                        ctx.shadowColor='rgba(0,0,0,0.18)'; ctx.shadowBlur=5; ctx.shadowOffsetX=2; ctx.shadowOffsetY=2;
-                        const hg = ctx.createLinearGradient(el.cx-BOX_W/2, cy-BOX_H/2, el.cx-BOX_W/2, cy+BOX_H/2);
-                        hg.addColorStop(0,'#7EC8E3'); hg.addColorStop(1,'#3A9EC0');
-                        ctx.fillStyle = hg;
-                        rr(el.cx-BOX_W/2, cy-BOX_H/2, BOX_W, BOX_H, 6); ctx.fill();
-                        ctx.shadowColor='transparent'; ctx.shadowBlur=0;
-                        ctx.strokeStyle='#1E6E90'; ctx.lineWidth=2;
-                        rr(el.cx-BOX_W/2, cy-BOX_H/2, BOX_W, BOX_H, 6); ctx.stroke();
-                        // label above box
-                        ctx.fillStyle='#222'; ctx.font='bold 12px Arial';
-                        ctx.textAlign='center'; ctx.textBaseline='middle';
-                        ctx.fillText('HIDDEN '+el.idx, el.cx, cy - BOX_H/2 - 14);
-                        // internals
-                        drawInternals(el.cx, cy, activationFn||'tansig', '#3A9EC0');
-                        // label below
-                        ctx.fillStyle='#555'; ctx.font='11px Arial';
-                        ctx.textAlign='center';
-                        ctx.fillText(neuronsPerLayer+' neurons', el.cx, cy + BOX_H/2 + 14);
+                    // box fill gradient
+                    const bg = ctx.createLinearGradient(bx,by,bx,by+BOX_H);
+                    bg.addColorStop(0,lyr.color); bg.addColorStop(1,lyr.dark);
+                    ctx.fillStyle=bg;
+                    ctx.beginPath();
+                    ctx.roundRect ? ctx.roundRect(bx,by,BOX_W,BOX_H,8)
+                                  : ctx.rect(bx,by,BOX_W,BOX_H);
+                    ctx.fill();
 
-                    } else if(el.type==='output'){
-                        // PURPLE box — like screenshot
-                        ctx.shadowColor='rgba(0,0,0,0.18)'; ctx.shadowBlur=5; ctx.shadowOffsetX=2; ctx.shadowOffsetY=2;
-                        const og = ctx.createLinearGradient(el.cx-BOX_W/2, cy-BOX_H/2, el.cx-BOX_W/2, cy+BOX_H/2);
-                        og.addColorStop(0,'#C39BD3'); og.addColorStop(1,'#7D3C98');
-                        ctx.fillStyle = og;
-                        rr(el.cx-BOX_W/2, cy-BOX_H/2, BOX_W, BOX_H, 6); ctx.fill();
-                        ctx.shadowColor='transparent'; ctx.shadowBlur=0;
-                        ctx.strokeStyle='#5B2C6F'; ctx.lineWidth=2;
-                        rr(el.cx-BOX_W/2, cy-BOX_H/2, BOX_W, BOX_H, 6); ctx.stroke();
-                        // label above
-                        ctx.fillStyle='#222'; ctx.font='bold 12px Arial';
-                        ctx.textAlign='center'; ctx.textBaseline='middle';
-                        ctx.fillText('OUTPUT', el.cx, cy - BOX_H/2 - 14);
-                        // internals with softmax
-                        drawInternals(el.cx, cy, 'softmax', '#7D3C98');
-                        // label below
-                        ctx.fillStyle='#555'; ctx.font='11px Arial';
-                        ctx.textAlign='center';
-                        ctx.fillText(nOut+' outputs', el.cx, cy + BOX_H/2 + 14);
+                    ctx.shadowColor='transparent'; ctx.shadowBlur=0;
 
-                    } else if(el.type==='outbubble'){
-                        // PINK square — like screenshot
-                        ctx.shadowColor='rgba(0,0,0,0.18)'; ctx.shadowBlur=5; ctx.shadowOffsetX=2; ctx.shadowOffsetY=2;
-                        const pg = ctx.createLinearGradient(el.cx-BUBBLE/2, cy-BUBBLE/2, el.cx-BUBBLE/2, cy+BUBBLE/2);
-                        pg.addColorStop(0,'#F1948A'); pg.addColorStop(1,'#E91E8C');
-                        ctx.fillStyle = pg;
-                        rr(el.cx-BUBBLE/2, cy-BUBBLE/2, BUBBLE, BUBBLE, 6); ctx.fill();
-                        ctx.shadowColor='transparent'; ctx.shadowBlur=0;
-                        ctx.strokeStyle='#A93226'; ctx.lineWidth=2;
-                        rr(el.cx-BUBBLE/2, cy-BUBBLE/2, BUBBLE, BUBBLE, 6); ctx.stroke();
-                        // number
-                        ctx.fillStyle='#fff'; ctx.font='bold 20px Arial';
-                        ctx.textAlign='center'; ctx.textBaseline='middle';
-                        ctx.fillText(nOut, el.cx, cy);
-                        // label above
-                        ctx.fillStyle='#222'; ctx.font='bold 12px Arial';
-                        ctx.fillText('OUTPUT', el.cx, cy - BUBBLE/2 - 14);
-                        // label below
-                        ctx.fillStyle='#555'; ctx.font='11px Arial';
-                        ctx.fillText(nOut+' classes', el.cx, cy + BUBBLE/2 + 14);
+                    // box border
+                    ctx.strokeStyle=lyr.dark; ctx.lineWidth=2;
+                    ctx.beginPath();
+                    ctx.roundRect ? ctx.roundRect(bx,by,BOX_W,BOX_H,8)
+                                  : ctx.rect(bx,by,BOX_W,BOX_H);
+                    ctx.stroke();
+
+                    // label
+                    ctx.fillStyle='#fff'; ctx.font='bold 13px Segoe UI,Arial';
+                    ctx.textAlign='center'; ctx.textBaseline='middle';
+                    ctx.fillText(lyr.label, cx2, by+22);
+
+                    // W b symbols for hidden/output
+                    if(i>0){
+                        ctx.fillStyle='rgba(255,255,255,0.9)';
+                        ctx.fillRect(cx2-22, centerY-18, 18, 18);
+                        ctx.fillRect(cx2+4,  centerY-18, 18, 18);
+                        ctx.strokeStyle='rgba(0,0,0,0.3)'; ctx.lineWidth=1;
+                        ctx.strokeRect(cx2-22, centerY-18, 18, 18);
+                        ctx.strokeRect(cx2+4,  centerY-18, 18, 18);
+                        ctx.fillStyle='#333'; ctx.font='bold 11px Segoe UI,Arial';
+                        ctx.fillText('W', cx2-13, centerY-9);
+                        ctx.fillText('b',  cx2+13,  centerY-9);
+                        ctx.fillStyle='#fff'; ctx.font='18px Arial';
+                        ctx.fillText('⊕', cx2, centerY+8);
+                        ctx.font='10px Segoe UI,Arial';
+                        ctx.fillText(i<layers.length-1 ? lyr.fn||'tansig' : 'purelin', cx2, centerY+30);
+                    } else {
+                        ctx.fillStyle='#fff'; ctx.font='bold 22px Segoe UI,Arial';
+                        ctx.fillText(lyr.neurons, cx2, centerY);
                     }
+
+                    // node count below box
+                    ctx.fillStyle='#444'; ctx.font='11px Segoe UI,Arial';
+                    ctx.fillText(i===0
+                        ? nIn+' nodes'
+                        : i===layers.length-1
+                            ? nOut+' outputs'
+                            : neuronsPerLayer+' neurons',
+                        cx2, by+BOX_H+18);
+                }
+
+                // ── final output bubble ──
+                const lastX = PAD + (layers.length-1)*spacing;
+                const bubX  = lastX + BOX_W/2 + 40;
+                if(bubX + 36 < cw){
+                    ctx.strokeStyle='#777'; ctx.lineWidth=2;
+                    ctx.beginPath(); ctx.moveTo(lastX+BOX_W/2, centerY);
+                    ctx.lineTo(bubX-18, centerY); ctx.stroke();
+                    ctx.fillStyle='#777';
+                    ctx.beginPath(); ctx.moveTo(bubX-18,centerY-6);
+                    ctx.lineTo(bubX-8,centerY); ctx.lineTo(bubX-18,centerY+6);
+                    ctx.closePath(); ctx.fill();
+                    const outGrad = ctx.createRadialGradient(bubX,centerY,2,bubX,centerY,26);
+                    outGrad.addColorStop(0,'#FFB6C1'); outGrad.addColorStop(1,'#FF69B4');
+                    ctx.fillStyle=outGrad;
+                    ctx.beginPath(); ctx.arc(bubX,centerY,26,0,Math.PI*2); ctx.fill();
+                    ctx.strokeStyle='#C71585'; ctx.lineWidth=2;
+                    ctx.beginPath(); ctx.arc(bubX,centerY,26,0,Math.PI*2); ctx.stroke();
+                    ctx.fillStyle='#fff'; ctx.font='bold 14px Segoe UI,Arial';
+                    ctx.textAlign='center'; ctx.textBaseline='middle';
+                    ctx.fillText(nOut, bubX, centerY);
+                    ctx.fillStyle='#444'; ctx.font='11px Segoe UI,Arial';
+                    ctx.fillText(nOut+' classes', bubX, centerY+42);
                 }
 
                 return canvas.toDataURL('image/png');
@@ -1386,53 +1313,130 @@
 
         // ── render results table inside existing resultsSection ───
         function renderResultsTable(results) {
-            // Remove previous table if any
             const old = document.getElementById('_backendTable');
             if (old) old.remove();
 
-            const STATUS_COLOR = {
-                COMPLIANT:'#065f46', PASS:'#065f46',
-                MARGINAL:'#92400e', FAIL:'#991b1b', EXCEEDANCE:'#991b1b'
-            };
-            const STATUS_BG = {
-                COMPLIANT:'#d1fae5', PASS:'#d1fae5',
-                MARGINAL:'#fef3c7', FAIL:'#fee2e2', EXCEEDANCE:'#fee2e2'
+            // ── build per-day data ──────────────────────────────────
+            const startDate = new Date(document.getElementById('startDate').value);
+            const horizon   = parseInt(document.getElementById('horizon').value) || 7;
+
+            // generate day-by-day predicted values (same drift as backend)
+            const days = [];
+            for (let d = 1; d <= horizon; d++) {
+                const dt = new Date(startDate);
+                dt.setDate(dt.getDate() + d);
+                const label = dt.toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'});
+                const dayRows = results.map((r, rIdx) => {
+                    const drift = 1 + Math.sin((d-1) * 0.4 + rIdx * 1.7) * 0.05;
+                    const val   = parseFloat((r.predicted * drift).toFixed(4));
+                    const std   = parseFloat(r.standard);
+                    let status;
+                    if (r.unit === '%') {
+                        status = val >= std ? 'GOOD FIT' : (val >= std*0.9 ? 'UNDERFIT MODEL' : 'OVERFIT MODEL');
+                    } else {
+                        const ratio = std ? val/std : 0;
+                        status = ratio <= 1.0 ? 'GOOD FIT' : (ratio <= 1.3 ? 'UNDERFIT MODEL' : 'OVERFIT MODEL');
+                    }
+                    return { ...r, predicted: val, status };
+                });
+                days.push({ day: d, label, rows: dayRows });
+            }
+
+            const STATUS_STYLE = {
+                'GOOD FIT':       'background:#d1fae5;color:#065f46;border:1.5px solid #6ee7b7;',
+                'UNDERFIT MODEL': 'background:#fef3c7;color:#92400e;border:1.5px solid #fcd34d;',
+                'OVERFIT MODEL':  'background:#fee2e2;color:#991b1b;border:1.5px solid #fca5a5;',
             };
 
             const div = document.createElement('div');
             div.id = '_backendTable';
-            div.style.cssText = 'background:white;border-radius:12px;padding:20px;margin-top:20px;overflow-x:auto;';
+            div.style.cssText = 'background:white;border-radius:16px;padding:28px;margin-top:24px;box-shadow:0 2px 12px rgba(0,0,0,0.07);';
+
+            // header
             div.innerHTML = `
-                <h3 style="color:#1e3a8a;margin-bottom:15px;font-size:1.1rem;">📋 Effluent Prediction Results</h3>
-                <table style="width:100%;border-collapse:collapse;font-size:0.9rem;">
-                    <thead>
-                        <tr style="background:#1e3a8a;color:white;">
-                            <th style="padding:10px 14px;text-align:left;">Parameter</th>
-                            <th style="padding:10px 14px;text-align:right;">Predicted Value</th>
-                            <th style="padding:10px 14px;text-align:center;">Unit</th>
-                            <th style="padding:10px 14px;text-align:right;">Standard</th>
-                            <th style="padding:10px 14px;text-align:center;">Status</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${results.map(r => `
-                        <tr style="border-bottom:1px solid #e5e7eb;">
-                            <td style="padding:10px 14px;font-weight:600;color:#1e3a8a;">${r.parameter}</td>
-                            <td style="padding:10px 14px;text-align:right;font-weight:700;color:#2563eb;font-size:1rem;">${r.predicted}</td>
-                            <td style="padding:10px 14px;text-align:center;color:#6b7280;">${r.unit}</td>
-                            <td style="padding:10px 14px;text-align:right;color:#6b7280;">${r.standard}</td>
-                            <td style="padding:10px 14px;text-align:center;">
-                                <span style="background:${STATUS_BG[r.status]||'#f3f4f6'};
-                                    color:${STATUS_COLOR[r.status]||'#374151'};
-                                    border:1px solid ${STATUS_COLOR[r.status]||'#374151'};
-                                    padding:3px 10px;border-radius:20px;
-                                    font-size:0.78rem;font-weight:700;">${r.status}</span>
-                            </td>
-                        </tr>`).join('')}
-                    </tbody>
-                </table>`;
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px;">
+              <span style="font-size:1.5rem;">📅</span>
+              <h2 style="color:#1e3a8a;font-size:1.4rem;font-weight:800;margin:0;">${horizon}-Day Daily Forecast</h2>
+            </div>
+            <div style="border-bottom:2.5px solid #1e3a8a;margin-bottom:16px;"></div>
+            <p style="color:#6b7280;font-size:0.88rem;margin-bottom:6px;">Click each day tab to see the prediction table for that date.</p>
+            <p style="color:#059669;font-size:0.82rem;margin-bottom:18px;">
+              📊 Parameter trend charts &amp; overview graphs are saved in the Excel file — click <strong>Export to Excel</strong> to view them.
+            </p>
+
+            <!-- Day tabs -->
+            <div id="_dayTabs" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:20px;">
+              ${days.map((d,i) => `
+                <button onclick="switchDay(${i})" id="_tab_${i}"
+                  style="padding:10px 18px;border-radius:10px;border:1.5px solid #e5e7eb;
+                         background:${i===0?'#1e3a8a':'white'};
+                         color:${i===0?'white':'#374151'};
+                         font-weight:700;cursor:pointer;min-width:100px;text-align:center;
+                         box-shadow:${i===0?'0 2px 8px rgba(30,58,138,0.3)':'none'};">
+                  <div style="font-size:0.95rem;">Day ${d.day}</div>
+                  <div style="font-size:0.75rem;font-weight:400;opacity:0.85;">${d.label}</div>
+                </button>`).join('')}
+            </div>
+
+            <!-- Day panels -->
+            ${days.map((d,i) => `
+            <div id="_dayPanel_${i}" style="display:${i===0?'block':'none'};">
+              <div style="display:flex;justify-content:space-between;align-items:center;
+                          background:#eff6ff;border-left:4px solid #1e3a8a;
+                          border-radius:8px;padding:12px 18px;margin-bottom:16px;">
+                <span style="font-size:1rem;font-weight:700;color:#1e3a8a;">
+                  Day ${d.day} <span style="font-weight:400;color:#6b7280;margin-left:8px;">Neural Network Effluent Prediction</span>
+                </span>
+                <span style="background:#1e3a8a;color:white;border-radius:8px;
+                             padding:6px 14px;font-size:0.85rem;font-weight:600;">
+                  📅 ${d.label}
+                </span>
+              </div>
+              <table style="width:100%;border-collapse:collapse;font-size:0.9rem;">
+                <thead>
+                  <tr style="background:#1e3a8a;color:white;">
+                    <th style="padding:11px 16px;text-align:left;border-radius:6px 0 0 0;">Parameter</th>
+                    <th style="padding:11px 16px;text-align:right;">Predicted Value</th>
+                    <th style="padding:11px 16px;text-align:center;">Unit</th>
+                    <th style="padding:11px 16px;text-align:right;">Standard</th>
+                    <th style="padding:11px 16px;text-align:center;border-radius:0 6px 0 0;">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${d.rows.map((r,ri) => `
+                  <tr style="background:${ri%2===0?'#f9fafb':'white'};border-bottom:1px solid #f0f0f0;">
+                    <td style="padding:12px 16px;font-weight:600;color:#1e3a8a;">${r.parameter}</td>
+                    <td style="padding:12px 16px;text-align:right;font-weight:800;color:#2563eb;font-size:1.05rem;">${r.predicted}</td>
+                    <td style="padding:12px 16px;text-align:center;color:#6b7280;">${r.unit}</td>
+                    <td style="padding:12px 16px;text-align:right;color:#6b7280;">${r.standard}</td>
+                    <td style="padding:12px 16px;text-align:center;">
+                      <span style="${STATUS_STYLE[r.status]||'background:#f3f4f6;color:#374151;border:1px solid #d1d5db;'}
+                        padding:4px 12px;border-radius:20px;font-size:0.78rem;font-weight:800;">
+                        ${r.status}
+                      </span>
+                    </td>
+                  </tr>`).join('')}
+                </tbody>
+              </table>
+            </div>`).join('')}
+            `;
 
             document.getElementById('resultsSection').appendChild(div);
+        }
+
+        function switchDay(idx) {
+            const horizon = parseInt(document.getElementById('horizon').value) || 7;
+            for (let i = 0; i < horizon; i++) {
+                const tab   = document.getElementById('_tab_'+i);
+                const panel = document.getElementById('_dayPanel_'+i);
+                if (!tab || !panel) continue;
+                const active = i === idx;
+                tab.style.background   = active ? '#1e3a8a' : 'white';
+                tab.style.color        = active ? 'white'   : '#374151';
+                tab.style.boxShadow    = active ? '0 2px 8px rgba(30,58,138,0.3)' : 'none';
+                tab.style.border       = active ? '1.5px solid #1e3a8a' : '1.5px solid #e5e7eb';
+                panel.style.display    = active ? 'block' : 'none';
+            }
         }
 
         // ── render MATLAB vs Prediction comparison charts ──────────
