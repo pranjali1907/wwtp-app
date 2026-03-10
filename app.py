@@ -964,15 +964,9 @@ def export_excel():
     ws5['A1'].alignment = CENTER
     ws5.row_dimensions[1].height = 30
 
-    header_cols5 = ['Date'] + [r['parameter'] + ' (' + r['unit'] + ')' for r in results] + ['Overall Status', 'Analysis']
+    header_cols5 = ['Date'] + [r['parameter'] + ' (' + r['unit'] + ')' for r in results] + ['Overall Status']
     set_header_row(ws5, 2, header_cols5)
     ws5.row_dimensions[2].height = 28
-
-    STATUS_ANALYSIS = {
-        'GOOD FIT':       'All parameters within discharge standards. Plant operating efficiently.',
-        'UNDERFIT MODEL': 'Some parameters approaching limits. Monitor closely and adjust dosing.',
-        'OVERFIT MODEL':  'Parameters exceeding standards. Immediate corrective action required.',
-    }
 
     for day_i in range(horizon + 1):
         current_date = start_dt + timedelta(days=day_i)
@@ -1002,7 +996,6 @@ def export_excel():
         else:
             overall = 'GOOD FIT'
 
-        analysis = STATUS_ANALYSIS.get(overall, '')
         row_fill = PatternFill('solid', fgColor='F8FAFC') if day_i % 2 == 0 else PatternFill()
 
         date_cell = ws5.cell(row_n, 1, value=date_str_fmt)
@@ -1025,30 +1018,36 @@ def export_excel():
         ov_cell.border = BORDER
         ov_cell.alignment = CENTER
 
-        an_cell = ws5.cell(row_n, len(results) + 3, value=analysis)
-        an_cell.font = Font(italic=True, color='374151', size=9)
-        an_cell.border = BORDER
-        an_cell.alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
         ws5.row_dimensions[row_n].height = 20
 
-    if results:
-        lc_daily = LineChart()
-        lc_daily.title = f'{results[0]["parameter"]} Daily Trend'
-        lc_daily.style = 10
-        lc_daily.y_axis.title = f'{results[0]["parameter"]} ({results[0]["unit"]})'
-        lc_daily.x_axis.title = 'Date'
-        lc_daily.width = 28; lc_daily.height = 14
-        data_daily = Reference(ws5, min_col=2, min_row=2, max_row=horizon + 3)
-        cats_daily = Reference(ws5, min_col=1, min_row=3, max_row=horizon + 3)
-        lc_daily.add_data(data_daily, titles_from_data=True)
-        lc_daily.set_categories(cats_daily)
-        lc_daily.series[0].graphicalProperties.line.solidFill = '3B82F6'
-        ws5.add_chart(lc_daily, f'A{horizon + 6}')
+    # One chart per output parameter
+    CHART_COLORS = ['3B82F6','EF4444','10B981','F59E0B','8B5CF6','EC4899','14B8A6','F97316']
+    charts_start_row = horizon + 6
+    charts_per_row = 2
+    chart_w = 18; chart_h = 14
+    cats_daily = Reference(ws5, min_col=1, min_row=3, max_row=horizon + 3)
+    for p_idx, res_row in enumerate(results):
+        lc_p = LineChart()
+        lc_p.title  = f'{res_row["parameter"]} — Daily Trend'
+        lc_p.style  = 10
+        lc_p.y_axis.title = f'{res_row["parameter"]} ({res_row["unit"]})'
+        lc_p.x_axis.title = 'Date'
+        lc_p.width  = chart_w; lc_p.height = chart_h
+        data_p = Reference(ws5, min_col=p_idx + 2, min_row=2, max_row=horizon + 3)
+        lc_p.add_data(data_p, titles_from_data=True)
+        lc_p.set_categories(cats_daily)
+        lc_p.series[0].graphicalProperties.line.solidFill = CHART_COLORS[p_idx % len(CHART_COLORS)]
+        col_pos  = (p_idx % charts_per_row)
+        row_pos  = (p_idx // charts_per_row)
+        # Each chart ~14 rows tall; place in 2-column grid
+        anchor_col = get_column_letter(col_pos * 8 + 1)
+        anchor_row = charts_start_row + row_pos * 22
+        ws5.add_chart(lc_p, f'{anchor_col}{anchor_row}')
 
     # ══════════════════════════════════════════════════════════════
-    # NETWORK ARCHITECTURE fallback (text table when no image)
+    # NETWORK ARCHITECTURE — always create text table
     # ══════════════════════════════════════════════════════════════
-    if not nn_img_b64:
+    if True:
         ws_na = wb.create_sheet('Network Architecture')
         ws_na.column_dimensions['A'].width = 22
         ws_na.column_dimensions['B'].width = 28
