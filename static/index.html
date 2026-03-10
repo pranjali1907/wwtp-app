@@ -1519,6 +1519,8 @@
                         metrics:              _pred.metrics,
                         nnConfig:             getNNConfig(),
                         networkDiagramImage:  imgB64,
+                        startDate:            document.getElementById('startDate').value,
+                        horizon:              parseInt(document.getElementById('horizon').value) || 7,
                     })
                 });
                 if (!res.ok) throw new Error(`Server error ${res.status}`);
