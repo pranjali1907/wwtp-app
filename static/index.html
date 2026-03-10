@@ -1080,7 +1080,7 @@
         // ═══════════════════════════════════════════════════════════
         //  BACKEND INTEGRATION — do not change layout above
         // ═══════════════════════════════════════════════════════════
-        const API = 'api';
+        const API = 'https://wwtp-app.onrender.com/api';
         let _pred = null;   // last prediction response
         let _metricCharts = {};  // Chart.js instances
 
@@ -1123,7 +1123,7 @@
             };
         }
 
-        // ── draw network diagram directly on canvas (reliable, no html2canvas) ──
+        // ── draw MATLAB-style network diagram on canvas ──
         async function captureNetworkDiagram() {
             try {
                 const cfg = getNNConfig();
@@ -1132,162 +1132,235 @@
                 const networkType    = cfg.networkType     || 'feedforward';
                 const activationFn   = cfg.activationFn   || 'tansig';
 
-                // count selected inputs/outputs
                 const nIn  = getSelectedInputIds().length  || 3;
                 const nOut = getSelectedOutputIdxs().length|| 2;
 
-                const totalLayers = 2 + hiddenLayers; // input + hidden(s) + output
-                const PAD   = 60;
-                const cw    = Math.max(900, totalLayers * 160 + PAD * 2);
-                const ch    = 420;
+                // layout constants — exactly matching screenshot
+                const BOX_W = 90, BOX_H = 110;
+                const BUBBLE = 46;           // square side for input/output bubbles
+                const GAP    = 90;           // gap between elements
+                const PAD    = 50;
+                // total elements: bubble + gap + [hidden boxes + gap]* + output box + gap + bubble
+                const totalLayers = 2 + hiddenLayers; // hidden count + output box
+                const cw = PAD*2 + BUBBLE + GAP + (hiddenLayers*(BOX_W+GAP)) + BOX_W + GAP + BUBBLE + PAD;
+                const ch    = 320;
 
                 const canvas = document.createElement('canvas');
-                canvas.width  = cw * 2;   // 2x for retina
+                canvas.width  = cw * 2;
                 canvas.height = ch * 2;
                 const ctx = canvas.getContext('2d');
                 ctx.scale(2, 2);
 
-                // ── background ──
-                ctx.fillStyle = '#e8e8e8';
-                ctx.fillRect(0, 0, cw, ch);
+                const cy = ch / 2 + 20;  // vertical center of boxes
 
-                // ── title bar ──
-                const grad = ctx.createLinearGradient(0,0,0,36);
-                grad.addColorStop(0,'#e0e0e0'); grad.addColorStop(1,'#c0c0c0');
-                ctx.fillStyle = grad;
-                ctx.fillRect(PAD-20, 12, cw - PAD*2 + 40, 36);
-                ctx.strokeStyle='#999'; ctx.lineWidth=1;
-                ctx.strokeRect(PAD-20, 12, cw - PAD*2 + 40, 36);
-                ctx.fillStyle='#333'; ctx.font='bold 13px Segoe UI,Arial';
-                ctx.textAlign='left'; ctx.textBaseline='middle';
-                const titles = {feedforward:'Feed Forward Neural Network (view)',
+                // ── WHITE background with light border (like screenshot) ──
+                ctx.fillStyle = '#f0f0f0';
+                ctx.fillRect(0, 0, cw, ch);
+                ctx.fillStyle = '#ffffff';
+                ctx.strokeStyle = '#cccccc'; ctx.lineWidth = 1;
+                ctx.fillRect(PAD-10, 50, cw-PAD*2+20, ch-60);
+                ctx.strokeRect(PAD-10, 50, cw-PAD*2+20, ch-60);
+
+                // ── TITLE BAR — exactly like MATLAB (grey gradient, M icon) ──
+                const tg = ctx.createLinearGradient(0,0,0,34);
+                tg.addColorStop(0,'#ececec'); tg.addColorStop(1,'#d0d0d0');
+                ctx.fillStyle = tg;
+                ctx.fillRect(0, 0, cw, 34);
+                ctx.strokeStyle='#aaa'; ctx.lineWidth=1;
+                ctx.strokeRect(0, 0, cw, 34);
+                // M icon (orange square)
+                ctx.fillStyle='#e05a00';
+                ctx.fillRect(10, 8, 18, 18);
+                ctx.fillStyle='#fff'; ctx.font='bold 12px Arial';
+                ctx.textAlign='center'; ctx.textBaseline='middle';
+                ctx.fillText('M', 19, 17);
+                // title text
+                ctx.fillStyle='#222'; ctx.font='13px Segoe UI,Arial';
+                ctx.textAlign='left';
+                const titleMap = {
+                    feedforward:'Feed Forward Neural Network (view)',
                     patternrecognition:'Pattern Recognition Neural Network (view)',
                     fitting:'Fitting Neural Network (view)',
                     lstm:'LSTM Neural Network (view)',
-                    gru:'GRU Neural Network (view)',cnn:'CNN Neural Network (view)'};
-                ctx.fillText(titles[networkType]||'Neural Network (view)', PAD, 30);
+                    gru:'GRU Neural Network (view)',
+                    cnn:'CNN Neural Network (view)'
+                };
+                ctx.fillText(titleMap[networkType]||'Neural Network (view)', 36, 17);
 
-                // ── layer definitions ──
-                const layers = [];
-                layers.push({label:'Input', neurons: nIn, color:'#4FC3F7', dark:'#0288D1'});
-                for(let i=0;i<hiddenLayers;i++){
-                    layers.push({label:'Hidden '+(i+1), neurons: neuronsPerLayer,
-                        color:'#81C784', dark:'#388E3C', fn: activationFn});
-                }
-                layers.push({label:'Output', neurons: nOut, color:'#FF8A65', dark:'#E64A19'});
-
-                const usableW = cw - PAD*2;
-                const spacing = usableW / (layers.length - 1);
-                const centerY = (ch + 60) / 2;
-                const BOX_W=90, BOX_H=130;
-
-                const boxCenters = [];
-
-                // ── draw connectors first (behind boxes) ──
-                for(let i=0;i<layers.length-1;i++){
-                    const x1 = PAD + i * spacing + BOX_W/2;
-                    const x2 = PAD + (i+1) * spacing - BOX_W/2;
-                    const y  = centerY;
-                    // draw arrow line
-                    ctx.strokeStyle='#777'; ctx.lineWidth=2;
-                    ctx.beginPath(); ctx.moveTo(x1, y); ctx.lineTo(x2-10, y); ctx.stroke();
-                    // arrowhead
-                    ctx.fillStyle='#777';
-                    ctx.beginPath();
-                    ctx.moveTo(x2-10, y-6); ctx.lineTo(x2, y); ctx.lineTo(x2-10, y+6);
-                    ctx.closePath(); ctx.fill();
-                    // dots
+                // ── helper: draw connector (dot — line —▶ dot) ──
+                function drawConnector(x1, x2, y) {
+                    ctx.strokeStyle='#555'; ctx.lineWidth=1.5;
+                    // left dot
                     ctx.fillStyle='#555';
-                    ctx.beginPath(); ctx.arc(x1,y,4,0,Math.PI*2); ctx.fill();
-                    ctx.beginPath(); ctx.arc(x2,y,4,0,Math.PI*2); ctx.fill();
-                }
-
-                // ── draw layer boxes ──
-                for(let i=0;i<layers.length;i++){
-                    const lyr = layers[i];
-                    const cx2  = PAD + i * spacing;
-                    const bx  = cx2 - BOX_W/2;
-                    const by  = centerY - BOX_H/2;
-                    boxCenters.push({x:cx2, y:centerY});
-
-                    // shadow
-                    ctx.shadowColor='rgba(0,0,0,0.2)'; ctx.shadowBlur=6; ctx.shadowOffsetX=2; ctx.shadowOffsetY=2;
-
-                    // box fill gradient
-                    const bg = ctx.createLinearGradient(bx,by,bx,by+BOX_H);
-                    bg.addColorStop(0,lyr.color); bg.addColorStop(1,lyr.dark);
-                    ctx.fillStyle=bg;
+                    ctx.beginPath(); ctx.arc(x1,y,3.5,0,Math.PI*2); ctx.fill();
+                    // line
+                    ctx.beginPath(); ctx.moveTo(x1+3.5,y); ctx.lineTo(x2-10,y); ctx.stroke();
+                    // arrowhead
                     ctx.beginPath();
-                    ctx.roundRect ? ctx.roundRect(bx,by,BOX_W,BOX_H,8)
-                                  : ctx.rect(bx,by,BOX_W,BOX_H);
-                    ctx.fill();
-
-                    ctx.shadowColor='transparent'; ctx.shadowBlur=0;
-
-                    // box border
-                    ctx.strokeStyle=lyr.dark; ctx.lineWidth=2;
-                    ctx.beginPath();
-                    ctx.roundRect ? ctx.roundRect(bx,by,BOX_W,BOX_H,8)
-                                  : ctx.rect(bx,by,BOX_W,BOX_H);
-                    ctx.stroke();
-
-                    // label
-                    ctx.fillStyle='#fff'; ctx.font='bold 13px Segoe UI,Arial';
-                    ctx.textAlign='center'; ctx.textBaseline='middle';
-                    ctx.fillText(lyr.label, cx2, by+22);
-
-                    // W b symbols for hidden/output
-                    if(i>0){
-                        ctx.fillStyle='rgba(255,255,255,0.9)';
-                        ctx.fillRect(cx2-22, centerY-18, 18, 18);
-                        ctx.fillRect(cx2+4,  centerY-18, 18, 18);
-                        ctx.strokeStyle='rgba(0,0,0,0.3)'; ctx.lineWidth=1;
-                        ctx.strokeRect(cx2-22, centerY-18, 18, 18);
-                        ctx.strokeRect(cx2+4,  centerY-18, 18, 18);
-                        ctx.fillStyle='#333'; ctx.font='bold 11px Segoe UI,Arial';
-                        ctx.fillText('W', cx2-13, centerY-9);
-                        ctx.fillText('b',  cx2+13,  centerY-9);
-                        ctx.fillStyle='#fff'; ctx.font='18px Arial';
-                        ctx.fillText('⊕', cx2, centerY+8);
-                        ctx.font='10px Segoe UI,Arial';
-                        ctx.fillText(i<layers.length-1 ? lyr.fn||'tansig' : 'purelin', cx2, centerY+30);
-                    } else {
-                        ctx.fillStyle='#fff'; ctx.font='bold 22px Segoe UI,Arial';
-                        ctx.fillText(lyr.neurons, cx2, centerY);
-                    }
-
-                    // node count below box
-                    ctx.fillStyle='#444'; ctx.font='11px Segoe UI,Arial';
-                    ctx.fillText(i===0
-                        ? nIn+' nodes'
-                        : i===layers.length-1
-                            ? nOut+' outputs'
-                            : neuronsPerLayer+' neurons',
-                        cx2, by+BOX_H+18);
-                }
-
-                // ── final output bubble ──
-                const lastX = PAD + (layers.length-1)*spacing;
-                const bubX  = lastX + BOX_W/2 + 40;
-                if(bubX + 36 < cw){
-                    ctx.strokeStyle='#777'; ctx.lineWidth=2;
-                    ctx.beginPath(); ctx.moveTo(lastX+BOX_W/2, centerY);
-                    ctx.lineTo(bubX-18, centerY); ctx.stroke();
-                    ctx.fillStyle='#777';
-                    ctx.beginPath(); ctx.moveTo(bubX-18,centerY-6);
-                    ctx.lineTo(bubX-8,centerY); ctx.lineTo(bubX-18,centerY+6);
+                    ctx.moveTo(x2-10,y-5); ctx.lineTo(x2,y); ctx.lineTo(x2-10,y+5);
                     ctx.closePath(); ctx.fill();
-                    const outGrad = ctx.createRadialGradient(bubX,centerY,2,bubX,centerY,26);
-                    outGrad.addColorStop(0,'#FFB6C1'); outGrad.addColorStop(1,'#FF69B4');
-                    ctx.fillStyle=outGrad;
-                    ctx.beginPath(); ctx.arc(bubX,centerY,26,0,Math.PI*2); ctx.fill();
-                    ctx.strokeStyle='#C71585'; ctx.lineWidth=2;
-                    ctx.beginPath(); ctx.arc(bubX,centerY,26,0,Math.PI*2); ctx.stroke();
-                    ctx.fillStyle='#fff'; ctx.font='bold 14px Segoe UI,Arial';
+                    // right dot
+                    ctx.beginPath(); ctx.arc(x2,y,3.5,0,Math.PI*2); ctx.fill();
+                }
+
+                // ── helper: draw W/b boxes + ⊕ + fn label inside a box ──
+                function drawInternals(cx, cy2, fnLabel, boxColor) {
+                    // W box
+                    ctx.fillStyle='rgba(255,255,255,0.85)';
+                    ctx.fillRect(cx-24, cy2-28, 20, 18);
+                    ctx.strokeStyle='rgba(0,0,0,0.25)'; ctx.lineWidth=0.8;
+                    ctx.strokeRect(cx-24, cy2-28, 20, 18);
+                    ctx.fillStyle='#111'; ctx.font='bold 10px Arial';
                     ctx.textAlign='center'; ctx.textBaseline='middle';
-                    ctx.fillText(nOut, bubX, centerY);
-                    ctx.fillStyle='#444'; ctx.font='11px Segoe UI,Arial';
-                    ctx.fillText(nOut+' classes', bubX, centerY+42);
+                    ctx.fillText('W', cx-14, cy2-19);
+                    // b box
+                    ctx.fillStyle='rgba(255,255,255,0.85)';
+                    ctx.fillRect(cx+4, cy2-28, 20, 18);
+                    ctx.strokeStyle='rgba(0,0,0,0.25)'; ctx.lineWidth=0.8;
+                    ctx.strokeRect(cx+4, cy2-28, 20, 18);
+                    ctx.fillStyle='#111'; ctx.font='bold 10px Arial';
+                    ctx.textAlign='center';
+                    ctx.fillText('b', cx+14, cy2-19);
+                    // ⊕ circle
+                    ctx.strokeStyle='rgba(255,255,255,0.7)'; ctx.lineWidth=1.5;
+                    ctx.beginPath(); ctx.arc(cx, cy2, 11, 0, Math.PI*2); ctx.stroke();
+                    ctx.fillStyle='rgba(255,255,255,0.15)';
+                    ctx.beginPath(); ctx.arc(cx, cy2, 11, 0, Math.PI*2); ctx.fill();
+                    ctx.fillStyle='#fff'; ctx.font='15px Arial';
+                    ctx.textAlign='center'; ctx.textBaseline='middle';
+                    ctx.fillText('⊕', cx, cy2+1);
+                    // fn label
+                    ctx.fillStyle='rgba(255,255,255,0.9)'; ctx.font='bold 9px Arial';
+                    ctx.fillText(fnLabel, cx, cy2+24);
+                }
+
+                // ── helper: draw a rounded rect ──
+                function rr(x,y,w,h,r){
+                    ctx.beginPath();
+                    ctx.moveTo(x+r,y);
+                    ctx.lineTo(x+w-r,y); ctx.arcTo(x+w,y,x+w,y+r,r);
+                    ctx.lineTo(x+w,y+h-r); ctx.arcTo(x+w,y+h,x+w-r,y+h,r);
+                    ctx.lineTo(x+r,y+h); ctx.arcTo(x,y+h,x,y+h-r,r);
+                    ctx.lineTo(x,y+r); ctx.arcTo(x,y,x+r,y,r);
+                    ctx.closePath();
+                }
+
+                // ── compute x positions of each element ──
+                // elements: [inputBubble, hidden1, hidden2, ..., outputBox, outputBubble]
+                let xPositions = [];
+                let x = PAD + BUBBLE/2;
+                xPositions.push({type:'input', cx: x});
+                x += BUBBLE/2 + GAP;
+                for(let i=0;i<hiddenLayers;i++){
+                    xPositions.push({type:'hidden', idx:i+1, cx: x + BOX_W/2});
+                    x += BOX_W + GAP;
+                }
+                xPositions.push({type:'output', cx: x + BOX_W/2});
+                x += BOX_W + GAP;
+                xPositions.push({type:'outbubble', cx: x + BUBBLE/2});
+
+                // ── draw connectors (all behind boxes) ──
+                for(let i=0;i<xPositions.length-1;i++){
+                    const el1 = xPositions[i], el2 = xPositions[i+1];
+                    let x1, x2;
+                    if(el1.type==='input')      x1 = el1.cx + BUBBLE/2;
+                    else if(el1.type==='outbubble') x1 = el1.cx + BUBBLE/2;
+                    else                           x1 = el1.cx + BOX_W/2;
+                    if(el2.type==='outbubble')  x2 = el2.cx - BUBBLE/2;
+                    else if(el2.type==='input') x2 = el2.cx - BUBBLE/2;
+                    else                        x2 = el2.cx - BOX_W/2;
+                    drawConnector(x1, x2, cy);
+                }
+
+                // ── draw each element ──
+                for(let i=0;i<xPositions.length;i++){
+                    const el = xPositions[i];
+
+                    if(el.type==='input'){
+                        // GREEN square — exactly like screenshot
+                        ctx.shadowColor='rgba(0,0,0,0.18)'; ctx.shadowBlur=5; ctx.shadowOffsetX=2; ctx.shadowOffsetY=2;
+                        const ig = ctx.createLinearGradient(el.cx-BUBBLE/2, cy-BUBBLE/2, el.cx-BUBBLE/2, cy+BUBBLE/2);
+                        ig.addColorStop(0,'#6EE070'); ig.addColorStop(1,'#2EAA2E');
+                        ctx.fillStyle = ig;
+                        rr(el.cx-BUBBLE/2, cy-BUBBLE/2, BUBBLE, BUBBLE, 6);
+                        ctx.fill();
+                        ctx.shadowColor='transparent'; ctx.shadowBlur=0;
+                        ctx.strokeStyle='#1A7A1A'; ctx.lineWidth=2;
+                        rr(el.cx-BUBBLE/2, cy-BUBBLE/2, BUBBLE, BUBBLE, 6); ctx.stroke();
+                        // number
+                        ctx.fillStyle='#fff'; ctx.font='bold 20px Arial';
+                        ctx.textAlign='center'; ctx.textBaseline='middle';
+                        ctx.fillText(nIn, el.cx, cy);
+                        // label above
+                        ctx.fillStyle='#222'; ctx.font='bold 12px Arial';
+                        ctx.fillText('INPUT', el.cx, cy - BUBBLE/2 - 14);
+                        // label below
+                        ctx.fillStyle='#555'; ctx.font='11px Arial';
+                        ctx.fillText(nIn+' nodes', el.cx, cy + BUBBLE/2 + 14);
+
+                    } else if(el.type==='hidden'){
+                        // BLUE box — like screenshot
+                        ctx.shadowColor='rgba(0,0,0,0.18)'; ctx.shadowBlur=5; ctx.shadowOffsetX=2; ctx.shadowOffsetY=2;
+                        const hg = ctx.createLinearGradient(el.cx-BOX_W/2, cy-BOX_H/2, el.cx-BOX_W/2, cy+BOX_H/2);
+                        hg.addColorStop(0,'#7EC8E3'); hg.addColorStop(1,'#3A9EC0');
+                        ctx.fillStyle = hg;
+                        rr(el.cx-BOX_W/2, cy-BOX_H/2, BOX_W, BOX_H, 6); ctx.fill();
+                        ctx.shadowColor='transparent'; ctx.shadowBlur=0;
+                        ctx.strokeStyle='#1E6E90'; ctx.lineWidth=2;
+                        rr(el.cx-BOX_W/2, cy-BOX_H/2, BOX_W, BOX_H, 6); ctx.stroke();
+                        // label above box
+                        ctx.fillStyle='#222'; ctx.font='bold 12px Arial';
+                        ctx.textAlign='center'; ctx.textBaseline='middle';
+                        ctx.fillText('HIDDEN '+el.idx, el.cx, cy - BOX_H/2 - 14);
+                        // internals
+                        drawInternals(el.cx, cy, activationFn||'tansig', '#3A9EC0');
+                        // label below
+                        ctx.fillStyle='#555'; ctx.font='11px Arial';
+                        ctx.textAlign='center';
+                        ctx.fillText(neuronsPerLayer+' neurons', el.cx, cy + BOX_H/2 + 14);
+
+                    } else if(el.type==='output'){
+                        // PURPLE box — like screenshot
+                        ctx.shadowColor='rgba(0,0,0,0.18)'; ctx.shadowBlur=5; ctx.shadowOffsetX=2; ctx.shadowOffsetY=2;
+                        const og = ctx.createLinearGradient(el.cx-BOX_W/2, cy-BOX_H/2, el.cx-BOX_W/2, cy+BOX_H/2);
+                        og.addColorStop(0,'#C39BD3'); og.addColorStop(1,'#7D3C98');
+                        ctx.fillStyle = og;
+                        rr(el.cx-BOX_W/2, cy-BOX_H/2, BOX_W, BOX_H, 6); ctx.fill();
+                        ctx.shadowColor='transparent'; ctx.shadowBlur=0;
+                        ctx.strokeStyle='#5B2C6F'; ctx.lineWidth=2;
+                        rr(el.cx-BOX_W/2, cy-BOX_H/2, BOX_W, BOX_H, 6); ctx.stroke();
+                        // label above
+                        ctx.fillStyle='#222'; ctx.font='bold 12px Arial';
+                        ctx.textAlign='center'; ctx.textBaseline='middle';
+                        ctx.fillText('OUTPUT', el.cx, cy - BOX_H/2 - 14);
+                        // internals with softmax
+                        drawInternals(el.cx, cy, 'softmax', '#7D3C98');
+                        // label below
+                        ctx.fillStyle='#555'; ctx.font='11px Arial';
+                        ctx.textAlign='center';
+                        ctx.fillText(nOut+' outputs', el.cx, cy + BOX_H/2 + 14);
+
+                    } else if(el.type==='outbubble'){
+                        // PINK square — like screenshot
+                        ctx.shadowColor='rgba(0,0,0,0.18)'; ctx.shadowBlur=5; ctx.shadowOffsetX=2; ctx.shadowOffsetY=2;
+                        const pg = ctx.createLinearGradient(el.cx-BUBBLE/2, cy-BUBBLE/2, el.cx-BUBBLE/2, cy+BUBBLE/2);
+                        pg.addColorStop(0,'#F1948A'); pg.addColorStop(1,'#E91E8C');
+                        ctx.fillStyle = pg;
+                        rr(el.cx-BUBBLE/2, cy-BUBBLE/2, BUBBLE, BUBBLE, 6); ctx.fill();
+                        ctx.shadowColor='transparent'; ctx.shadowBlur=0;
+                        ctx.strokeStyle='#A93226'; ctx.lineWidth=2;
+                        rr(el.cx-BUBBLE/2, cy-BUBBLE/2, BUBBLE, BUBBLE, 6); ctx.stroke();
+                        // number
+                        ctx.fillStyle='#fff'; ctx.font='bold 20px Arial';
+                        ctx.textAlign='center'; ctx.textBaseline='middle';
+                        ctx.fillText(nOut, el.cx, cy);
+                        // label above
+                        ctx.fillStyle='#222'; ctx.font='bold 12px Arial';
+                        ctx.fillText('OUTPUT', el.cx, cy - BUBBLE/2 - 14);
+                        // label below
+                        ctx.fillStyle='#555'; ctx.font='11px Arial';
+                        ctx.fillText(nOut+' classes', el.cx, cy + BUBBLE/2 + 14);
+                    }
                 }
 
                 return canvas.toDataURL('image/png');
