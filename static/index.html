@@ -1080,7 +1080,7 @@
         // ═══════════════════════════════════════════════════════════
         //  BACKEND INTEGRATION — do not change layout above
         // ═══════════════════════════════════════════════════════════
-        const API = 'api';
+        const API = 'http://localhost:5000/api';
         let _pred = null;   // last prediction response
         let _metricCharts = {};  // Chart.js instances
 
@@ -1123,56 +1123,176 @@
             };
         }
 
-        // ── capture network diagram as base64 PNG ──────────────────
+        // ── draw network diagram directly on canvas (reliable, no html2canvas) ──
         async function captureNetworkDiagram() {
-            if (typeof html2canvas === 'undefined') return '';
             try {
-                // Target the full outer container
-                const outer = document.querySelector('.matlab-network-container');
-                const diagram = document.getElementById('networkDiagram');
-                const layerCont = document.getElementById('layerContainer');
-                if (!outer || !diagram || !layerCont) return '';
+                const cfg = getNNConfig();
+                const hiddenLayers   = cfg.hiddenLayers    || 1;
+                const neuronsPerLayer= cfg.neuronsPerLayer || 10;
+                const networkType    = cfg.networkType     || 'feedforward';
+                const activationFn   = cfg.activationFn   || 'tansig';
 
-                // Save original styles
-                const origDiagOverflow  = diagram.style.overflow;
-                const origDiagMinH      = diagram.style.minHeight;
-                const origLayerMinW     = layerCont.style.minWidth;
-                const origOuterW        = outer.style.width;
+                // count selected inputs/outputs
+                const nIn  = getSelectedInputIds().length  || 3;
+                const nOut = getSelectedOutputIdxs().length|| 2;
 
-                // Get the full scrollable content size
-                const fullW = layerCont.scrollWidth + 80;
-                const fullH = layerCont.scrollHeight + 80;
+                const totalLayers = 2 + hiddenLayers; // input + hidden(s) + output
+                const PAD   = 60;
+                const cw    = Math.max(900, totalLayers * 160 + PAD * 2);
+                const ch    = 420;
 
-                // Temporarily remove overflow clipping so html2canvas sees everything
-                diagram.style.overflow  = 'visible';
-                diagram.style.minHeight = fullH + 'px';
-                layerCont.style.minWidth = fullW + 'px';
-                outer.style.width       = fullW + 'px';
+                const canvas = document.createElement('canvas');
+                canvas.width  = cw * 2;   // 2x for retina
+                canvas.height = ch * 2;
+                const ctx = canvas.getContext('2d');
+                ctx.scale(2, 2);
 
-                // Small wait for layout reflow
-                await new Promise(r => setTimeout(r, 80));
+                // ── background ──
+                ctx.fillStyle = '#e8e8e8';
+                ctx.fillRect(0, 0, cw, ch);
 
-                const canvas = await html2canvas(outer, {
-                    backgroundColor: '#e8e8e8',
-                    scale: 2,
-                    useCORS: true,
-                    scrollX: 0,
-                    scrollY: 0,
-                    width:  outer.scrollWidth,
-                    height: outer.scrollHeight,
-                    windowWidth:  outer.scrollWidth,
-                    windowHeight: outer.scrollHeight,
-                });
+                // ── title bar ──
+                const grad = ctx.createLinearGradient(0,0,0,36);
+                grad.addColorStop(0,'#e0e0e0'); grad.addColorStop(1,'#c0c0c0');
+                ctx.fillStyle = grad;
+                ctx.fillRect(PAD-20, 12, cw - PAD*2 + 40, 36);
+                ctx.strokeStyle='#999'; ctx.lineWidth=1;
+                ctx.strokeRect(PAD-20, 12, cw - PAD*2 + 40, 36);
+                ctx.fillStyle='#333'; ctx.font='bold 13px Segoe UI,Arial';
+                ctx.textAlign='left'; ctx.textBaseline='middle';
+                const titles = {feedforward:'Feed Forward Neural Network (view)',
+                    patternrecognition:'Pattern Recognition Neural Network (view)',
+                    fitting:'Fitting Neural Network (view)',
+                    lstm:'LSTM Neural Network (view)',
+                    gru:'GRU Neural Network (view)',cnn:'CNN Neural Network (view)'};
+                ctx.fillText(titles[networkType]||'Neural Network (view)', PAD, 30);
 
-                // Restore original styles
-                diagram.style.overflow  = origDiagOverflow;
-                diagram.style.minHeight = origDiagMinH;
-                layerCont.style.minWidth = origLayerMinW;
-                outer.style.width       = origOuterW;
+                // ── layer definitions ──
+                const layers = [];
+                layers.push({label:'Input', neurons: nIn, color:'#4FC3F7', dark:'#0288D1'});
+                for(let i=0;i<hiddenLayers;i++){
+                    layers.push({label:'Hidden '+(i+1), neurons: neuronsPerLayer,
+                        color:'#81C784', dark:'#388E3C', fn: activationFn});
+                }
+                layers.push({label:'Output', neurons: nOut, color:'#FF8A65', dark:'#E64A19'});
+
+                const usableW = cw - PAD*2;
+                const spacing = usableW / (layers.length - 1);
+                const centerY = (ch + 60) / 2;
+                const BOX_W=90, BOX_H=130;
+
+                const boxCenters = [];
+
+                // ── draw connectors first (behind boxes) ──
+                for(let i=0;i<layers.length-1;i++){
+                    const x1 = PAD + i * spacing + BOX_W/2;
+                    const x2 = PAD + (i+1) * spacing - BOX_W/2;
+                    const y  = centerY;
+                    // draw arrow line
+                    ctx.strokeStyle='#777'; ctx.lineWidth=2;
+                    ctx.beginPath(); ctx.moveTo(x1, y); ctx.lineTo(x2-10, y); ctx.stroke();
+                    // arrowhead
+                    ctx.fillStyle='#777';
+                    ctx.beginPath();
+                    ctx.moveTo(x2-10, y-6); ctx.lineTo(x2, y); ctx.lineTo(x2-10, y+6);
+                    ctx.closePath(); ctx.fill();
+                    // dots
+                    ctx.fillStyle='#555';
+                    ctx.beginPath(); ctx.arc(x1,y,4,0,Math.PI*2); ctx.fill();
+                    ctx.beginPath(); ctx.arc(x2,y,4,0,Math.PI*2); ctx.fill();
+                }
+
+                // ── draw layer boxes ──
+                for(let i=0;i<layers.length;i++){
+                    const lyr = layers[i];
+                    const cx2  = PAD + i * spacing;
+                    const bx  = cx2 - BOX_W/2;
+                    const by  = centerY - BOX_H/2;
+                    boxCenters.push({x:cx2, y:centerY});
+
+                    // shadow
+                    ctx.shadowColor='rgba(0,0,0,0.2)'; ctx.shadowBlur=6; ctx.shadowOffsetX=2; ctx.shadowOffsetY=2;
+
+                    // box fill gradient
+                    const bg = ctx.createLinearGradient(bx,by,bx,by+BOX_H);
+                    bg.addColorStop(0,lyr.color); bg.addColorStop(1,lyr.dark);
+                    ctx.fillStyle=bg;
+                    ctx.beginPath();
+                    ctx.roundRect ? ctx.roundRect(bx,by,BOX_W,BOX_H,8)
+                                  : ctx.rect(bx,by,BOX_W,BOX_H);
+                    ctx.fill();
+
+                    ctx.shadowColor='transparent'; ctx.shadowBlur=0;
+
+                    // box border
+                    ctx.strokeStyle=lyr.dark; ctx.lineWidth=2;
+                    ctx.beginPath();
+                    ctx.roundRect ? ctx.roundRect(bx,by,BOX_W,BOX_H,8)
+                                  : ctx.rect(bx,by,BOX_W,BOX_H);
+                    ctx.stroke();
+
+                    // label
+                    ctx.fillStyle='#fff'; ctx.font='bold 13px Segoe UI,Arial';
+                    ctx.textAlign='center'; ctx.textBaseline='middle';
+                    ctx.fillText(lyr.label, cx2, by+22);
+
+                    // W b symbols for hidden/output
+                    if(i>0){
+                        ctx.fillStyle='rgba(255,255,255,0.9)';
+                        ctx.fillRect(cx2-22, centerY-18, 18, 18);
+                        ctx.fillRect(cx2+4,  centerY-18, 18, 18);
+                        ctx.strokeStyle='rgba(0,0,0,0.3)'; ctx.lineWidth=1;
+                        ctx.strokeRect(cx2-22, centerY-18, 18, 18);
+                        ctx.strokeRect(cx2+4,  centerY-18, 18, 18);
+                        ctx.fillStyle='#333'; ctx.font='bold 11px Segoe UI,Arial';
+                        ctx.fillText('W', cx2-13, centerY-9);
+                        ctx.fillText('b',  cx2+13,  centerY-9);
+                        ctx.fillStyle='#fff'; ctx.font='18px Arial';
+                        ctx.fillText('⊕', cx2, centerY+8);
+                        ctx.font='10px Segoe UI,Arial';
+                        ctx.fillText(i<layers.length-1 ? lyr.fn||'tansig' : 'purelin', cx2, centerY+30);
+                    } else {
+                        ctx.fillStyle='#fff'; ctx.font='bold 22px Segoe UI,Arial';
+                        ctx.fillText(lyr.neurons, cx2, centerY);
+                    }
+
+                    // node count below box
+                    ctx.fillStyle='#444'; ctx.font='11px Segoe UI,Arial';
+                    ctx.fillText(i===0
+                        ? nIn+' nodes'
+                        : i===layers.length-1
+                            ? nOut+' outputs'
+                            : neuronsPerLayer+' neurons',
+                        cx2, by+BOX_H+18);
+                }
+
+                // ── final output bubble ──
+                const lastX = PAD + (layers.length-1)*spacing;
+                const bubX  = lastX + BOX_W/2 + 40;
+                if(bubX + 36 < cw){
+                    ctx.strokeStyle='#777'; ctx.lineWidth=2;
+                    ctx.beginPath(); ctx.moveTo(lastX+BOX_W/2, centerY);
+                    ctx.lineTo(bubX-18, centerY); ctx.stroke();
+                    ctx.fillStyle='#777';
+                    ctx.beginPath(); ctx.moveTo(bubX-18,centerY-6);
+                    ctx.lineTo(bubX-8,centerY); ctx.lineTo(bubX-18,centerY+6);
+                    ctx.closePath(); ctx.fill();
+                    const outGrad = ctx.createRadialGradient(bubX,centerY,2,bubX,centerY,26);
+                    outGrad.addColorStop(0,'#FFB6C1'); outGrad.addColorStop(1,'#FF69B4');
+                    ctx.fillStyle=outGrad;
+                    ctx.beginPath(); ctx.arc(bubX,centerY,26,0,Math.PI*2); ctx.fill();
+                    ctx.strokeStyle='#C71585'; ctx.lineWidth=2;
+                    ctx.beginPath(); ctx.arc(bubX,centerY,26,0,Math.PI*2); ctx.stroke();
+                    ctx.fillStyle='#fff'; ctx.font='bold 14px Segoe UI,Arial';
+                    ctx.textAlign='center'; ctx.textBaseline='middle';
+                    ctx.fillText(nOut, bubX, centerY);
+                    ctx.fillStyle='#444'; ctx.font='11px Segoe UI,Arial';
+                    ctx.fillText(nOut+' classes', bubX, centerY+42);
+                }
 
                 return canvas.toDataURL('image/png');
             } catch(e) {
-                console.error('Diagram capture error:', e);
+                console.error('Diagram canvas error:', e);
                 return '';
             }
         }
