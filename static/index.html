@@ -61,6 +61,11 @@
             50% { transform: scale(1.1); opacity: 0.8; }
         }
 
+        @keyframes spin {
+            from { display: inline-block; transform: rotate(0deg); }
+            to   { display: inline-block; transform: rotate(360deg); }
+        }
+
         .card {
             background: white;
             border-radius: 20px;
@@ -708,6 +713,7 @@
                 <button class="btn btn-primary" onclick="runPrediction()">RUN PREDICTION</button>
                 <button class="btn btn-success" onclick="exportExcel()">EXPORT TO EXCEL</button>
                 <button class="btn btn-warning" onclick="exportMat()">⬇ DOWNLOAD MATLAB SCRIPT</button>
+                <button class="btn btn-warning" id="btnDownloadPreprocessed" onclick="downloadPreprocessed()" style="background:linear-gradient(135deg,#0f766e,#14b8a6);border-color:#0f766e;" disabled>⬇ DOWNLOAD PREPROCESSED DATA</button>
             </div>
 
             <!-- MATLAB Instruction Card -->
@@ -1065,124 +1071,188 @@
 
         // ── Parameter ID aliases: maps common column name variants → param id ──
         const PARAM_ALIASES = {
-            // COD Influent
-            'cod_inf': 'cod_inf', 'cod inf': 'cod_inf', 'cod influent': 'cod_inf', 'cod': 'cod_inf',
-            // BOD Influent
-            'bod_inf': 'bod_inf', 'bod inf': 'bod_inf', 'bod influent': 'bod_inf', 'bod': 'bod_inf',
-            // TSS Influent
-            'tss_inf': 'tss_inf', 'tss inf': 'tss_inf', 'tss influent': 'tss_inf', 'tss': 'tss_inf',
-            // NH3-N Influent
-            'nh3_inf': 'nh3_inf', 'nh3 inf': 'nh3_inf', 'nh3-n influent': 'nh3_inf', 'nh3': 'nh3_inf', 'nh3-n': 'nh3_inf',
-            // Flow Rate
-            'flow': 'flow', 'flow rate': 'flow', 'flow_rate': 'flow',
-            // Dissolved Oxygen
-            'do': 'do', 'dissolved oxygen': 'do', 'dissolved_oxygen': 'do',
-            // MLSS
-            'mlss': 'mlss',
-            // Sludge Age / SRT
-            'sludge_age': 'sludge_age', 'sludge age': 'sludge_age', 'srt': 'srt',
-            // MBR
+            'cod_inf': 'cod_inf', 'cod inf': 'cod_inf', 'cod influent': 'cod_inf',
+            'cod': 'cod_inf', 'chemical oxygen demand': 'cod_inf',
+            'bod_inf': 'bod_inf', 'bod inf': 'bod_inf', 'bod influent': 'bod_inf',
+            'bod': 'bod_inf', 'biological oxygen demand': 'bod_inf',
+            'tss_inf': 'tss_inf', 'tss inf': 'tss_inf', 'tss influent': 'tss_inf',
+            'tss': 'tss_inf', 'total suspended solids': 'tss_inf',
+            'nh3_inf': 'nh3_inf', 'nh3 inf': 'nh3_inf', 'nh3-n influent': 'nh3_inf',
+            'nh3': 'nh3_inf', 'nh3-n': 'nh3_inf', 'ammonia': 'nh3_inf', 'ammonia nitrogen': 'nh3_inf',
+            'flow': 'flow', 'flow rate': 'flow', 'flow_rate': 'flow', 'q': 'flow', 'flowrate': 'flow',
+            'do': 'do', 'dissolved oxygen': 'do', 'dissolved_oxygen': 'do', 'd.o': 'do', 'd.o.': 'do',
+            'mlss': 'mlss', 'mixed liquor': 'mlss', 'mixed liquor suspended solids': 'mlss',
+            'sludge_age': 'sludge_age', 'sludge age': 'sludge_age',
+            'srt': 'srt', 'solids retention time': 'sludge_age',
             'tmp': 'tmp', 'transmembrane pressure': 'tmp', 'transmembrane_pressure': 'tmp',
-            'flux': 'flux', 'membrane flux': 'flux', 'membrane_flux': 'flux',
-            // SBR
-            'cycle_time': 'cycle_time', 'cycle time': 'cycle_time',
-            'fill_time': 'fill_time', 'fill time': 'fill_time',
-            'react_time': 'react_time', 'react time': 'react_time',
-            // MLE
-            'tn_inf': 'tn_inf', 'tn inf': 'tn_inf', 'total nitrogen': 'tn_inf',
-            'internal_recycle': 'internal_recycle', 'internal recycle': 'internal_recycle', 'internal recycle ratio': 'internal_recycle',
-            'sludge_recycle': 'sludge_recycle', 'sludge recycle': 'sludge_recycle', 'sludge recycle ratio': 'sludge_recycle',
-            // Bardenpho
+            'flux': 'flux', 'membrane flux': 'flux', 'membrane_flux': 'flux', 'lmh': 'flux',
+            'cycle_time': 'cycle_time', 'cycle time': 'cycle_time', 'cycle': 'cycle_time',
+            'fill_time': 'fill_time', 'fill time': 'fill_time', 'fill': 'fill_time',
+            'react_time': 'react_time', 'react time': 'react_time', 'react': 'react_time', 'reaction time': 'react_time',
+            'tn_inf': 'tn_inf', 'tn inf': 'tn_inf', 'total nitrogen': 'tn_inf', 'tn': 'tn_inf', 'total n': 'tn_inf',
+            'internal_recycle': 'internal_recycle', 'internal recycle': 'internal_recycle',
+            'internal recycle ratio': 'internal_recycle', 'ir': 'internal_recycle', 'irr': 'internal_recycle',
+            'sludge_recycle': 'sludge_recycle', 'sludge recycle': 'sludge_recycle',
+            'sludge recycle ratio': 'sludge_recycle', 'sr': 'sludge_recycle', 'srr': 'sludge_recycle',
             'tp_inf': 'tp_inf', 'tp inf': 'tp_inf', 'total phosphorus': 'tp_inf',
-            'stages': 'stages', 'anoxic stages': 'stages',
+            'tp': 'tp_inf', 'total p': 'tp_inf', 'phosphorus': 'tp_inf',
+            'stages': 'stages', 'anoxic stages': 'stages', 'anoxic': 'stages',
             'anaerobic_hrt': 'anaerobic_hrt', 'anaerobic hrt': 'anaerobic_hrt',
+            'hrt': 'anaerobic_hrt', 'hydraulic retention time': 'anaerobic_hrt',
         };
 
         function normalizeHeader(h) {
             return h.trim().toLowerCase().replace(/\s*\(.*?\)/g, '').replace(/[-\/]/g, ' ').replace(/\s+/g, ' ').trim();
         }
 
-        function applyRowToParams(headers, values) {
+        // Holds the parsed full dataset waiting to be sent for preprocessing
+        let _uploadedRows    = [];
+        let _uploadedHeaders = [];
+
+        function applyAvgToParams(avgClean) {
             let matched = 0;
-            headers.forEach((h, i) => {
-                const key = normalizeHeader(h);
-                const paramId = PARAM_ALIASES[key];
-                if (!paramId) return;
-                const el = document.getElementById(`val_${paramId}`);
-                if (el && values[i] !== undefined && values[i] !== '') {
-                    const num = parseFloat(values[i]);
-                    if (!isNaN(num)) { el.value = num; matched++; }
-                }
+            Object.entries(avgClean).forEach(([pid, val]) => {
+                const el = document.getElementById(`val_${pid}`);
+                if (el) { el.value = val; matched++; }
             });
             return matched;
         }
 
-        function showUploadSuccess(fileName, fileSize, matched, total) {
+        function showUploadProcessing(fileName, fileSize, nRows, nMatched, nParams) {
             const zone = document.getElementById('uploadZone');
-            const pct = total ? Math.round(matched / total * 100) : 0;
             zone.innerHTML = `
-                <div class="upload-icon">✅</div>
-                <h3 style="color:#1e3a8a;">${fileName}</h3>
-                <p style="color:#6b7280;margin-top:6px;">${(fileSize/1024).toFixed(1)} KB &nbsp;·&nbsp; Click to change file</p>
-                <p style="margin-top:8px;font-weight:600;color:${matched>0?'#065f46':'#92400e'};">
-                    ${matched > 0
-                        ? `✔ ${matched} / ${total} parameters matched (${pct}%)`
-                        : '⚠ No matching parameter columns found — check column headers'}
+                <div class="upload-icon" style="animation:spin 1s linear infinite;">⚙️</div>
+                <h3 style="color:#1e3a8a;">Preprocessing <em>${fileName}</em>…</h3>
+                <p style="color:#6b7280;margin-top:6px;">
+                    ${(fileSize/1024).toFixed(1)} KB &nbsp;·&nbsp;
+                    <strong>${nRows}</strong> rows &nbsp;·&nbsp;
+                    <strong style="color:${nMatched>0?'#065f46':'#92400e'};">${nMatched}/${nParams} columns matched</strong>
+                </p>
+                <p style="margin-top:8px;font-size:0.78rem;color:#6b7280;">
+                    Applying: Mean Imputation → IQR Outlier Clamping → Min-Max Normalisation → Z-Score Standardisation
                 </p>
                 <input type="file" id="fileInput" style="display:none;" accept=".xlsx,.xls,.csv" onchange="handleFileUpload(event)">
             `;
         }
 
+        function showUploadDone(fileName, fileSize, nRows, dataTypeLabel, nParams, dlFname) {
+            const zone = document.getElementById('uploadZone');
+            zone.innerHTML = `
+                <div class="upload-icon">✅</div>
+                <h3 style="color:#1e3a8a;">${fileName}</h3>
+                <p style="color:#6b7280;margin-top:6px;">
+                    ${typeof fileSize === 'number' ? (fileSize/1024).toFixed(1)+' KB &nbsp;·&nbsp;' : ''}
+                    <strong>${nRows}</strong> records parsed &nbsp;·&nbsp;
+                    <strong style="color:#1e3a8a;">${dataTypeLabel}</strong>
+                </p>
+                <p style="margin-top:6px;font-size:0.82rem;font-weight:600;color:#065f46;">
+                    ✔ Downloaded: <code style="background:#f0fdf4;padding:1px 6px;border-radius:4px;">${dlFname}</code>
+                </p>
+                <p style="margin-top:4px;font-size:0.75rem;color:#6b7280;">Input fields filled with clean averages · Drop another file to reprocess</p>
+                <input type="file" id="fileInput" style="display:none;" accept=".xlsx,.xls,.csv" onchange="handleFileUpload(event)">
+            `;
+        }
+
+        function showUploadError(fileName, fileSize, nRows, nMatched, nParams, errMsg) {
+            const zone = document.getElementById('uploadZone');
+            zone.innerHTML = `
+                <div class="upload-icon">⚠️</div>
+                <h3 style="color:#991b1b;">${fileName}</h3>
+                <p style="color:#6b7280;margin-top:6px;">${(fileSize/1024).toFixed(1)} KB &nbsp;·&nbsp; ${nRows} rows</p>
+                <p style="margin-top:6px;font-size:0.82rem;font-weight:600;color:#991b1b;">Preprocessing failed: ${errMsg}</p>
+                <p style="margin-top:4px;font-size:0.75rem;color:#6b7280;">Drop the file again to retry</p>
+                <input type="file" id="fileInput" style="display:none;" accept=".xlsx,.xls,.csv" onchange="handleFileUpload(event)">
+            `;
+        }
+
+        let _rawFile = null;
+
+        async function runPreprocessPipeline(file) {
+            const plantType = document.getElementById('plantType').value;
+            if (!plantType) { alert('Please select a Plant Type before uploading data.'); return; }
+            const btn = document.getElementById('btnDownloadPreprocessed');
+            if (btn) btn.disabled = true;
+            showUploadSpinner(file.name, file.size);
+            try {
+                const formData = new FormData();
+                formData.append('plantType', plantType);
+                formData.append('file', file, file.name);
+                const res = await fetch(`${API}/preprocess`, {
+                    method: 'POST',
+                    body: formData   // multipart/form-data — no Content-Type header needed
+                });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    throw new Error(err.error || `Server error ${res.status}`);
+                }
+                const avgParamsRaw = res.headers.get('X-Avg-Params');
+                const dataType     = res.headers.get('X-Data-Type') || 'generic';
+                const rowCount     = res.headers.get('X-Row-Count') || '?';
+                if (avgParamsRaw) { try { applyAvgToParams(JSON.parse(avgParamsRaw)); } catch(e) {} }
+                const blob = await res.blob();
+                const disposition = res.headers.get('Content-Disposition') || '';
+                const match = disposition.match(/filename=([^;]+)/);
+                const now = new Date();
+                const ts  = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}_${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}${String(now.getSeconds()).padStart(2,'0')}`;
+                const dlFname = match ? match[1].trim() : `${file.name.replace(/\.[^.]+$/,'')}_preprocessed_${ts}.xlsx`;
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url; a.download = dlFname; a.click();
+                URL.revokeObjectURL(url);
+                const typeLabels = { stp_excel:'📋 STP Test Report (PMC)', scada_csv:'📡 SCADA Sensor Data', generic:'📊 Generic Parameter Data' };
+                showUploadDone(file.name, file.size, rowCount, typeLabels[dataType]||dataType, currentParams.length, dlFname);
+                if (btn) { btn.textContent = '⬇ DOWNLOAD PREPROCESSED DATA'; btn.disabled = false; }
+            } catch(err) {
+                showUploadError(file.name, file.size, 0, 0, currentParams.length, err.message);
+                if (btn) btn.disabled = false;
+            }
+        }
+
+        function showUploadSpinner(fileName, fileSize) {
+            const zone = document.getElementById('uploadZone');
+            zone.innerHTML = `
+                <div class="upload-icon" style="animation:spin 1s linear infinite;">⚙️</div>
+                <h3 style="color:#1e3a8a;">Preprocessing <em>${fileName}</em>…</h3>
+                <p style="color:#6b7280;margin-top:6px;">${(fileSize/1024).toFixed(1)} KB — Detecting format &amp; applying pipeline…</p>
+                <p style="margin-top:8px;font-size:0.78rem;color:#6b7280;">
+                    Mean Imputation → IQR Outlier Clamping → Min-Max Normalisation → Z-Score Standardisation
+                </p>
+                <input type="file" id="fileInput" style="display:none;" accept=".xlsx,.xls,.csv" onchange="handleFileUpload(event)">
+            `;
+        }
+
+        async function parseAndStore(file) {
+            _rawFile = file;
+            _uploadedRows = []; _uploadedHeaders = [];
+            const ext = file.name.split('.').pop().toLowerCase();
+            if (ext === 'csv') {
+                try {
+                    const text = await file.text();
+                    const lines = text.split(/\r?\n/).filter(l => l.trim());
+                    if (lines.length >= 2) {
+                        _uploadedHeaders = lines[0].split(',').map(h => h.trim());
+                        const mappedH = _uploadedHeaders.map(h => PARAM_ALIASES[normalizeHeader(h)] || null);
+                        lines.slice(1).forEach(l => {
+                            const vals = l.split(',').map(v => v.trim());
+                            const obj = {};
+                            mappedH.forEach((pid, i) => { if (pid) obj[pid] = vals[i] || ''; });
+                            if (Object.keys(obj).length) _uploadedRows.push(obj);
+                        });
+                    }
+                } catch(e) {}
+            }
+            await runPreprocessPipeline(file);
+        }
+
         function handleFileUpload(event) {
             const file = event.target.files[0];
             if (!file) return;
-
             const ext = file.name.split('.').pop().toLowerCase();
-            const reader = new FileReader();
-
-            if (ext === 'csv') {
-                // ── CSV path ──────────────────────────────────────────
-                reader.onload = function(e) {
-                    const text = e.target.result;
-                    const lines = text.split(/\r?\n/).filter(l => l.trim());
-                    if (lines.length < 2) {
-                        alert('CSV must have at least a header row and one data row.');
-                        return;
-                    }
-                    const headers = lines[0].split(',');
-                    // Use first data row
-                    const values = lines[1].split(',');
-                    const matched = applyRowToParams(headers, values);
-                    showUploadSuccess(file.name, file.size, matched, currentParams.length);
-                };
-                reader.readAsText(file);
-
-            } else if (ext === 'xlsx' || ext === 'xls') {
-                // ── Excel path — use SheetJS ──────────────────────────
-                reader.onload = function(e) {
-                    try {
-                        const XLSX = window.XLSX;
-                        if (!XLSX) { alert('SheetJS not loaded — please refresh and try again.'); return; }
-                        const data = new Uint8Array(e.target.result);
-                        const wb   = XLSX.read(data, { type: 'array' });
-                        const ws   = wb.Sheets[wb.SheetNames[0]];
-                        const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
-                        if (rows.length < 2) {
-                            alert('Excel sheet must have at least a header row and one data row.');
-                            return;
-                        }
-                        const headers = rows[0].map(String);
-                        const values  = rows[1].map(String);
-                        const matched = applyRowToParams(headers, values);
-                        showUploadSuccess(file.name, file.size, matched, currentParams.length);
-                    } catch(err) {
-                        alert('Could not parse Excel file: ' + err.message);
-                    }
-                };
-                reader.readAsArrayBuffer(file);
-            } else {
+            if (!['csv','xlsx','xls'].includes(ext)) {
                 alert('Unsupported file type. Please upload .xlsx, .xls, or .csv.');
+                return;
             }
+            parseAndStore(file);
         }
 
         // ═══════════════════════════════════════════════════════════
@@ -1868,7 +1938,6 @@
                 const url  = URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
-                // Read the actual filename from the server's Content-Disposition header
                 const disposition = res.headers.get('Content-Disposition') || '';
                 const match = disposition.match(/filename=([^;]+)/);
                 const now = new Date();
@@ -1879,6 +1948,13 @@
             } catch (err) {
                 alert(`MATLAB export error: ${err.message}`);
             }
+        }
+
+        async function downloadPreprocessed() {
+            const plantType = document.getElementById('plantType').value;
+            if (!plantType) { alert('Please select a Plant Type first.'); return; }
+            if (!_rawFile)  { alert('Please drop a CSV or Excel file first.'); return; }
+            await runPreprocessPipeline(_rawFile);
         }
         // ═══════════════════════════════════════════════════════════
         //  END BACKEND INTEGRATION
@@ -1910,6 +1986,59 @@
             const files = e.dataTransfer.files;
             if (files.length) handleFileUpload({ target: { files } });
         });
+        let preprocessedFile = null;
+
+async function handleFileUpload(event) {
+
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const formData = new FormData();
+    formData.append("file", file);
+
+    const uploadZone = document.getElementById("uploadZone");
+    uploadZone.innerHTML = "⏳ Processing file...";
+
+    try {
+
+        const response = await fetch("/api/preprocess", {
+            method: "POST",
+            body: formData
+        });
+
+        const data = await response.json();
+
+        if (!data.success) {
+            uploadZone.innerHTML = "❌ Preprocessing failed: " + data.error;
+            return;
+        }
+
+        preprocessedFile = data.file;
+
+        uploadZone.innerHTML =
+            "✅ File processed successfully<br>" +
+            "Rows: " + data.rows;
+
+        document.getElementById("btnDownloadPreprocessed").disabled = false;
+
+    } catch (err) {
+        uploadZone.innerHTML = "❌ Server error: " + err;
+    }
+}
+function downloadPreprocessed(){
+
+    if(!preprocessedFile) return;
+
+    const link = document.createElement("a");
+
+    link.href = "data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64," + preprocessedFile;
+
+    link.download = "preprocessed_dataset.xlsx";
+
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+}
     </script>
 </body>
 </html>
