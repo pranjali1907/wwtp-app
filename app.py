@@ -87,7 +87,7 @@ def fast_preprocess_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
         return pldf.to_pandas()
     except Exception:
-        df = fast_preprocess_dataframe(df)
+        # polars failed — return the original pandas df unchanged
         return df
 
 # ── PLANT DATABASE ─────────────────────────────────────────────────────────────
@@ -521,7 +521,7 @@ def _replace_off_strings(df: pd.DataFrame) -> tuple:
         replaced += int(mask.sum())
         df.loc[mask, col] = np.nan
     df = fast_preprocess_dataframe(df)
-        return df, replaced
+    return df, replaced
 
 def _smart_read(file_bytes: bytes, fname_lower: str) -> pd.DataFrame:
     """Read any xlsx/xls/csv into a clean DataFrame."""
@@ -531,7 +531,7 @@ def _smart_read(file_bytes: bytes, fname_lower: str) -> pd.DataFrame:
                 df = pd.read_csv(io.BytesIO(file_bytes), encoding=enc,
                                  skip_blank_lines=True, na_values=list(OFF_STRINGS))
                 df = fast_preprocess_dataframe(df)
-        return df
+                return df
             except Exception:
                 continue
         raise ValueError("Cannot decode CSV — try saving as UTF-8.")
