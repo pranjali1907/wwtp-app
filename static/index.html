@@ -1986,59 +1986,6 @@
             const files = e.dataTransfer.files;
             if (files.length) handleFileUpload({ target: { files } });
         });
-        let preprocessedFile = null;
-
-async function handleFileUpload(event) {
-
-    const file = event.target.files[0];
-    if (!file) return;
-
-    const formData = new FormData();
-    formData.append("file", file);
-
-    const uploadZone = document.getElementById("uploadZone");
-    uploadZone.innerHTML = "⏳ Processing file...";
-
-    try {
-
-        const response = await fetch("/api/preprocess", {
-            method: "POST",
-            body: formData
-        });
-
-        const data = await response.json();
-
-        if (!data.success) {
-            uploadZone.innerHTML = "❌ Preprocessing failed: " + data.error;
-            return;
-        }
-
-        preprocessedFile = data.file;
-
-        uploadZone.innerHTML =
-            "✅ File processed successfully<br>" +
-            "Rows: " + data.rows;
-
-        document.getElementById("btnDownloadPreprocessed").disabled = false;
-
-    } catch (err) {
-        uploadZone.innerHTML = "❌ Server error: " + err;
-    }
-}
-function downloadPreprocessed(){
-
-    if(!preprocessedFile) return;
-
-    const link = document.createElement("a");
-
-    link.href = "data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64," + preprocessedFile;
-
-    link.download = "preprocessed_dataset.xlsx";
-
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-}
     </script>
 </body>
 </html>
