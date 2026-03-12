@@ -1,18 +1,20 @@
 """
-WWTP Neural Prediction System — Backend v3.0 (Production)
+WWTP Neural Prediction System — Backend v4.0 (Production)
 Deploy : gunicorn --workers=4 --threads=2 --timeout=120 app:app
 Open   : https://your-app.onrender.com
 
-Requirements: pip install flask openpyxl gunicorn
+Requirements: pip install flask openpyxl gunicorn pandas scipy numpy scikit-learn
 """
 
 from flask import Flask, request, jsonify, send_from_directory, Response
 import json, math, random, os, io, csv, base64, logging
 from datetime import datetime, timedelta
 import pandas as pd
+import numpy as np
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.styles.numbers import FORMAT_NUMBER_COMMA_SEPARATED1
 import hashlib
 
 # ── LOGGING (Production) ───────────────────────────────────────────────────────
@@ -155,7 +157,6 @@ def compute_metrics(seed):
     r2   = round(0.972 + srand(seed,1)*0.025, 4)
     rmse = round(0.012 + srand(seed,2)*0.018, 4)
     mae  = round(0.008 + srand(seed,3)*0.012, 4)
-    # generate epoch-by-epoch training history (50 epochs)
     history = {'epochs':[], 'train_loss':[], 'val_loss':[], 'rmse_hist':[], 'r2_hist':[], 'mae_hist':[]}
     tl = 1.0; vl = 1.05
     for ep in range(1, 51):
@@ -185,7 +186,6 @@ def gen_matlab(pt, params, nn_cfg, predicted, selected_input_ids, selected_outpu
     out_u   = pdata.get('out_units', [])
     stds    = pdata.get('standards', [])
 
-    # only selected inputs/outputs
     sel_inp  = [p for p in all_inp if p['id'] in selected_input_ids] if selected_input_ids else all_inp
     sel_out  = [all_out[i] for i in selected_output_idxs] if selected_output_idxs else all_out
     sel_ou   = [out_u[i]   for i in selected_output_idxs] if selected_output_idxs else out_u
@@ -208,7 +208,6 @@ def gen_matlab(pt, params, nn_cfg, predicted, selected_input_ids, selected_outpu
     sv   = ', '.join([str(s) for s in sel_std])
     now  = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    # Fallback if called without a pre-computed base name
     if mat_basename is None:
         hash_input = ''.join(f'{k}={v}' for k, v in sorted(params.items()))
         hex_hash   = hashlib.md5(hash_input.encode()).hexdigest()[:3]
@@ -278,11 +277,10 @@ net.trainParam.epochs      = {ep};
 net.trainParam.goal        = 1e-6;
 net.trainParam.max_fail    = 15;
 net.trainParam.show        = 25;
-net.trainParam.showWindow  = true;   % ← opens MATLAB Neural Network Training GUI
+net.trainParam.showWindow  = true;
 
 %% 5. TRAIN
 fprintf('[TRAIN] Starting training with {algo} algorithm...\\n');
-fprintf('[TRAIN] Training window will open automatically.\\n\\n');
 [net, tr_rec] = train(net, X_norm, Y_norm);
 
 %% 6. PERFORMANCE
@@ -321,25 +319,17 @@ end
 
 %% 8. OPEN ALL FIGURE WINDOWS
 fprintf('\\n[FIGURES] Opening all simulation figures...\\n');
-
-% Helper: position figures in a grid so they don't overlap
-scr = get(0,'ScreenSize');  % [x y width height]
-fw = floor(scr(3)/3);       % figure width  = 1/3 screen
-fh = floor(scr(4)/2);       % figure height = 1/2 screen
+scr = get(0,'ScreenSize');
+fw = floor(scr(3)/3); fh = floor(scr(4)/2);
 pos = @(col,row) [fw*(col-1)+10, scr(4)-fh*row-40, fw-20, fh-60];
 
-% Fig 1 — Training Performance (top-left)
 f1 = figure('Name','[1] Training Performance','NumberTitle','off','Position',pos(1,1));
 plotperform(tr_rec);
 title(sprintf('Training Performance — {pt.upper()} | Best: Epoch %d | MSE: %.6f', tr_rec.best_epoch, min(tr_rec.perf)));
-fprintf('  ✓ Figure 1: Training Performance\\n');
 
-% Fig 2 — Regression Plot (top-center)
 f2 = figure('Name','[2] Regression R²','NumberTitle','off','Position',pos(2,1));
 plotregression(Y_norm, Y_pred_n, sprintf('ANN Regression — R²=%.4f', R2));
-fprintf('  ✓ Figure 2: Regression (R²=%.4f)\\n', R2);
 
-% Fig 3 — Error Histogram (top-right)
 f3 = figure('Name','[3] Error Histogram','NumberTitle','off','Position',pos(3,1));
 errors = Y_raw - Y_pred;
 histogram(errors(:), 40, 'FaceColor',[0 0.75 0.65], 'EdgeColor','w');
@@ -347,30 +337,18 @@ hold on;
 xline(mean(errors(:)), 'r--', 'LineWidth', 2, 'Label', sprintf('Mean=%.4f', mean(errors(:))));
 xlabel('Prediction Error'); ylabel('Frequency');
 title('Error Histogram — {pt.upper()}'); grid on;
-fprintf('  ✓ Figure 3: Error Histogram\\n');
 
-% Fig 4 — Actual vs Predicted (bottom-left)
 f4 = figure('Name','[4] Actual vs Predicted','NumberTitle','off','Position',pos(1,2));
 x_ax = 1:n_outputs;
 b = bar(x_ax, [target_vals(:), y_new(:)]);
-b(1).FaceColor = [0.2 0.6 0.9];
-b(2).FaceColor = [0.1 0.8 0.5];
+b(1).FaceColor = [0.2 0.6 0.9]; b(2).FaceColor = [0.1 0.8 0.5];
 set(gca,'XTick',x_ax,'XTickLabel',output_labels,'XTickLabelRotation',30,'FontSize',9);
 legend('Actual (Target)','Predicted (ANN)','Location','best');
 ylabel('Value'); title('Actual vs Predicted Effluent — {pt.upper()}'); grid on;
-% Add value labels on bars
-for k = 1:n_outputs
-    text(k-0.15, target_vals(k), sprintf('%.2f',target_vals(k)), 'HorizontalAlignment','center','VerticalAlignment','bottom','FontSize',7,'Color',[0.1 0.4 0.8]);
-    text(k+0.15, y_new(k),       sprintf('%.2f',y_new(k)),       'HorizontalAlignment','center','VerticalAlignment','bottom','FontSize',7,'Color',[0.05 0.5 0.3]);
-end
-fprintf('  ✓ Figure 4: Actual vs Predicted\\n');
 
-% Fig 5 — Network Architecture Viewer (bottom-center)
 f5 = figure('Name','[5] Network Architecture','NumberTitle','off','Position',pos(2,2));
-view(net);   % opens MATLAB interactive network diagram
-fprintf('  ✓ Figure 5: Network Architecture (view)\\n');
+view(net);
 
-% Fig 6 — Metrics Summary (bottom-right)
 f6 = figure('Name','[6] Metrics Summary','NumberTitle','off','Position',pos(3,2));
 metric_names  = {{'R² Score','RMSE','MAE','MSE x1000'}};
 metric_values = [R2, RMSE, MAE, MSE*1000];
@@ -385,7 +363,6 @@ for m = 1:4
     ylim([0, metric_values(m)*1.35]);
 end
 sgtitle('Model Performance Metrics — {pt.upper()}', 'FontSize', 13, 'FontWeight', 'bold');
-fprintf('  ✓ Figure 6: Performance Metrics\\n');
 
 %% 9. SAVE RESULTS
 results.plant      = '{pt}';
@@ -400,24 +377,14 @@ results.net=net; results.tr=tr_rec;
 save_file = fullfile(pwd, '{mat_results_name}');
 save(save_file, '-struct', 'results');
 
-%% 10. DONE
-fprintf('\\n');
-fprintf('╔══════════════════════════════════════════════════════╗\\n');
-fprintf('║   SIMULATION COMPLETE                               ║\\n');
-fprintf('║   6 figure windows are now open on your screen.    ║\\n');
-fprintf('║   Results saved to: {mat_results_name}             ║\\n');
-fprintf('╚══════════════════════════════════════════════════════╝\\n\\n');
-fprintf('[SAVE] Results saved to: %s\\n', save_file);
-fprintf('[DONE] All figures are open. Close them when done.\\n');
-
-% Bring Figure 1 to front so user sees it first
+fprintf('\\n[DONE] All figures open. Results saved to: %s\\n', save_file);
 figure(f1);
 """
 
 # ── API ROUTES ────────────────────────────────────────────────────────────────
 @app.route('/api/status')
 def status():
-    return jsonify({'status':'running','version':'3.0','plants':list(PLANT_PARAMS.keys())})
+    return jsonify({'status':'running','version':'4.0','plants':list(PLANT_PARAMS.keys())})
 
 @app.route('/api/plant-params')
 def get_params():
@@ -439,7 +406,6 @@ def predict():
 
     pred = physics_predict(pt, params)
     seed = round(sum(params.values()), 2)
-    # small deterministic noise
     for i in range(len(pred)):
         pred[i] = round(pred[i]*(1+(srand(seed,i*7+13)-0.5)*0.06), 4)
 
@@ -466,15 +432,928 @@ def predict():
         'plantLabel': pdata['label'],
     })
 
+
+# ════════════════════════════════════════════════════════════════════════════════
+#  FULL PREPROCESSING PIPELINE
+#  Steps:
+#   1. Smart file reading  (xlsx / xls / csv, any encoding, auto-header)
+#   2. Drop empty rows / cols
+#   3. Replace day-off / sentinel strings with NaN
+#   4. Type coercion  — force numeric where possible
+#   5. Missing-value imputation  (median for skewed, mean for normal cols)
+#   6. IQR outlier detection & Winsorisation (clip to [Q1-1.5*IQR, Q3+1.5*IQR])
+#   7. Min-Max Normalisation  → [0, 1]
+#   8. Z-Score Standardisation → μ=0, σ=1   (stored in separate columns)
+#   9. Duplicate row removal
+#  10. Styled multi-sheet Excel output with audit log
+# ════════════════════════════════════════════════════════════════════════════════
+
+OFF_STRINGS = {
+    'sunday','holiday','off','n/a','na','nil','not available',
+    'none','null','–','—','-','--','---','#n/a','#na','#value!',
+    '#ref!','#div/0!','#null!','error','nan','', ' '
+}
+
+def _coerce_numeric(series: pd.Series) -> pd.Series:
+    """Try to convert a column to numeric; return NaN for anything that fails."""
+    return pd.to_numeric(series.astype(str).str.strip().str.replace(',','', regex=False),
+                         errors='coerce')
+
+def _is_numeric_col(series: pd.Series, threshold: float = 0.60) -> bool:
+    """Return True if ≥ threshold fraction of non-null values are numeric."""
+    coerced = _coerce_numeric(series.dropna())
+    return coerced.notna().mean() >= threshold if len(coerced) else False
+
+def _replace_off_strings(df: pd.DataFrame) -> tuple:
+    """Replace sentinel strings with NaN. Returns (df, count_replaced)."""
+    replaced = 0
+    for col in df.columns:
+        mask = df[col].astype(str).str.strip().str.lower().isin(OFF_STRINGS)
+        replaced += int(mask.sum())
+        df.loc[mask, col] = np.nan
+    return df, replaced
+
+def _smart_read(file_bytes: bytes, fname_lower: str) -> pd.DataFrame:
+    """Read any xlsx/xls/csv into a clean DataFrame."""
+    if fname_lower.endswith('.csv'):
+        for enc in ('utf-8', 'utf-8-sig', 'latin-1', 'cp1252', 'iso-8859-1'):
+            try:
+                df = pd.read_csv(io.BytesIO(file_bytes), encoding=enc,
+                                 skip_blank_lines=True, na_values=list(OFF_STRINGS))
+                return df
+            except Exception:
+                continue
+        raise ValueError("Cannot decode CSV — try saving as UTF-8.")
+    else:
+        # Find the actual header row (first row with ≥3 text cells)
+        raw = pd.read_excel(io.BytesIO(file_bytes), header=None, engine='openpyxl')
+        hdr_row = 0
+        for i, row in raw.iterrows():
+            text_cells = [str(c).strip() for c in row
+                          if c is not None and str(c).strip() not in ('', 'nan', 'None')]
+            if len(text_cells) >= 3:
+                hdr_row = i
+                break
+        df = pd.read_excel(io.BytesIO(file_bytes), header=hdr_row,
+                           engine='openpyxl', na_values=list(OFF_STRINGS))
+        # Drop MPCB-style limit rows (rows where ≥2 cells start with '<')
+        if len(df) > 0:
+            lt_mask = df.iloc[0].astype(str).str.strip().str.startswith('<').sum() >= 2
+            if lt_mask:
+                df = df.iloc[1:].reset_index(drop=True)
+        return df
+
+
+def full_preprocess_pipeline(file_bytes: bytes, fname_lower: str) -> dict:
+    """
+    Run the complete 10-step preprocessing pipeline.
+    Returns a dict with:
+      - df_clean      : final cleaned DataFrame (normalised)
+      - df_zscore     : z-score standardised DataFrame (numeric cols only)
+      - audit         : dict with step-by-step statistics
+      - num_cols      : list of numeric column names
+      - non_num_cols  : list of non-numeric column names
+      - original_shape: (rows, cols) before cleaning
+    """
+    audit = {}
+
+    # ── STEP 1: Read file ──────────────────────────────────────────────────────
+    df = _smart_read(file_bytes, fname_lower)
+    audit['step1_read'] = {'rows': len(df), 'cols': len(df.columns),
+                           'columns': list(df.columns)}
+    original_shape = (len(df), len(df.columns))
+
+    # Normalise column names
+    df.columns = [str(c).strip() for c in df.columns]
+
+    # ── STEP 2: Drop fully-empty rows and columns ──────────────────────────────
+    rows_before = len(df)
+    cols_before = len(df.columns)
+    df = df.dropna(how='all').dropna(axis=1, how='all').reset_index(drop=True)
+    audit['step2_drop_empty'] = {
+        'rows_dropped': rows_before - len(df),
+        'cols_dropped': cols_before - len(df.columns)
+    }
+
+    # ── STEP 3: Replace sentinel / day-off strings with NaN ───────────────────
+    df, replaced_count = _replace_off_strings(df)
+    audit['step3_sentinel_replace'] = {'cells_replaced_with_nan': replaced_count}
+
+    # ── STEP 4: Type coercion — convert numeric-looking columns ───────────────
+    coerced_cols = []
+    non_num_cols = []
+    for col in df.columns:
+        if _is_numeric_col(df[col]):
+            df[col] = _coerce_numeric(df[col])
+            coerced_cols.append(col)
+        else:
+            non_num_cols.append(col)
+
+    num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    audit['step4_type_coercion'] = {
+        'numeric_cols': len(num_cols),
+        'text_cols': len(non_num_cols),
+        'numeric_col_names': num_cols
+    }
+
+    if len(num_cols) == 0:
+        raise ValueError("No numeric columns found after type coercion. "
+                         "Please check the file format.")
+
+    # ── STEP 5: Missing-value imputation ──────────────────────────────────────
+    # Use median for skewed distributions (|skew| > 1), mean otherwise
+    imputation_log = {}
+    total_missing_before = int(df[num_cols].isna().sum().sum())
+
+    for col in num_cols:
+        n_missing = int(df[col].isna().sum())
+        if n_missing == 0:
+            continue
+        col_data = df[col].dropna()
+        if len(col_data) == 0:
+            fill_val = 0.0
+            method   = 'zero (all missing)'
+        else:
+            skewness = float(col_data.skew())
+            if abs(skewness) > 1.0:
+                fill_val = float(col_data.median())
+                method   = f'median (skew={skewness:.2f})'
+            else:
+                fill_val = float(col_data.mean())
+                method   = f'mean (skew={skewness:.2f})'
+        df[col] = df[col].fillna(round(fill_val, 6))
+        imputation_log[col] = {'missing': n_missing, 'fill_value': round(fill_val,6),
+                               'method': method}
+
+    # Also forward-fill / backward-fill any remaining NaN in non-numeric cols
+    df[non_num_cols] = df[non_num_cols].ffill().bfill()
+
+    audit['step5_imputation'] = {
+        'total_missing_before': total_missing_before,
+        'total_imputed': total_missing_before,
+        'per_column': imputation_log
+    }
+
+    # ── STEP 6: IQR Outlier Detection & Winsorisation ─────────────────────────
+    outlier_log = {}
+    total_outliers = 0
+    for col in num_cols:
+        q1  = df[col].quantile(0.25)
+        q3  = df[col].quantile(0.75)
+        iqr = q3 - q1
+        lower = q1 - 1.5 * iqr
+        upper = q3 + 1.5 * iqr
+        n_low  = int((df[col] < lower).sum())
+        n_high = int((df[col] > upper).sum())
+        n_out  = n_low + n_high
+        if n_out > 0:
+            df[col] = df[col].clip(lower=lower, upper=upper)
+            outlier_log[col] = {
+                'outliers_clamped': n_out,
+                'below_lower': n_low,
+                'above_upper': n_high,
+                'lower_fence': round(lower, 6),
+                'upper_fence': round(upper, 6)
+            }
+            total_outliers += n_out
+
+    audit['step6_outlier_iqr'] = {
+        'total_outliers_clamped': total_outliers,
+        'per_column': outlier_log
+    }
+
+    # ── STEP 7: Min-Max Normalisation → [0, 1] ────────────────────────────────
+    minmax_log = {}
+    df_norm = df.copy()
+    for col in num_cols:
+        mn = df[col].min()
+        mx = df[col].max()
+        if mx != mn:
+            df_norm[col] = (df[col] - mn) / (mx - mn)
+        else:
+            df_norm[col] = 0.0   # constant column → 0
+        minmax_log[col] = {'min': round(float(mn), 6), 'max': round(float(mx), 6)}
+
+    audit['step7_minmax_norm'] = {
+        'range': '[0, 1]',
+        'per_column': minmax_log
+    }
+
+    # ── STEP 8: Z-Score Standardisation → μ=0, σ=1 ───────────────────────────
+    zscore_log = {}
+    df_z = df.copy()          # standardise from RAW (pre-normalisation) values
+    for col in num_cols:
+        mu    = float(df[col].mean())
+        sigma = float(df[col].std(ddof=1))
+        if sigma > 0:
+            df_z[col] = (df[col] - mu) / sigma
+        else:
+            df_z[col] = 0.0
+        zscore_log[col] = {'mean': round(mu, 6), 'std': round(sigma, 6)}
+
+    audit['step8_zscore'] = {
+        'target_mean': 0,
+        'target_std': 1,
+        'per_column': zscore_log
+    }
+
+    # ── STEP 9: Remove duplicate rows ─────────────────────────────────────────
+    rows_before_dedup = len(df_norm)
+    df_norm = df_norm.drop_duplicates().reset_index(drop=True)
+    df_z    = df_z.iloc[:len(df_norm)].reset_index(drop=True)   # keep same rows
+    dupes_removed = rows_before_dedup - len(df_norm)
+    audit['step9_dedup'] = {'duplicate_rows_removed': dupes_removed,
+                             'final_rows': len(df_norm)}
+
+    # ── STEP 10: Final summary ─────────────────────────────────────────────────
+    audit['step10_summary'] = {
+        'original_shape':  original_shape,
+        'final_shape':     (len(df_norm), len(df_norm.columns)),
+        'numeric_columns': len(num_cols),
+        'text_columns':    len(non_num_cols)
+    }
+
+    return {
+        'df_raw':       df,           # after imputation + outlier clamp (raw scale)
+        'df_norm':      df_norm,      # min-max normalised [0,1]
+        'df_z':         df_z,         # z-score standardised
+        'audit':        audit,
+        'num_cols':     num_cols,
+        'non_num_cols': non_num_cols,
+        'original_shape': original_shape
+    }
+
+
+# ── SMART PMC STP EXCEL PARSER (unchanged from v3) ────────────────────────────
+def parse_stp_excel(file_bytes):
+    def safe_float(v):
+        try:    return float(v)
+        except: return None
+    def safe_int(v):
+        try:    return int(float(v))
+        except: return 0
+
+    wb      = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+    records = []
+    for sname in wb.sheetnames:
+        ws   = wb[sname]
+        rows = list(ws.iter_rows(values_only=True))
+        hdr_idx = None
+        for i, row in enumerate(rows):
+            cells = ' '.join(str(c).lower() for c in row if c)
+            if 'ph' in cells and 'cod' in cells:
+                hdr_idx = i; break
+        if hdr_idx is None:
+            continue
+        data_start = hdr_idx + 3
+        for row in rows[data_start:]:
+            if len(row) < 13: continue
+            sr = row[1]
+            if sr is None: continue
+            dt    = row[2]
+            plant = str(row[3]).strip() if row[3] else ''
+            mld   = safe_int(row[4])
+            cell5 = row[5]
+            is_off = isinstance(cell5, str) and cell5.strip().lower() in ('sunday','holiday','')
+            if is_off:
+                rec = {'day':safe_int(sr),'date':dt,'plant':plant,'flow_mld':mld,
+                       'ph_in':0,'bod_in':0,'cod_in':0,'tss_in':0,
+                       'ph_out':0,'bod_out':0,'cod_out':0,'tss_out':0,
+                       'chlorine':0,'source_month':sname,'label_compliant':0}
+            else:
+                def v0(x): return safe_float(x) or 0
+                ph_in=v0(row[5]); bod_in=v0(row[6]); cod_in=v0(row[7]); tss_in=v0(row[8])
+                ph_out=v0(row[9]); bod_out=v0(row[10]); cod_out=v0(row[11]); tss_out=v0(row[12])
+                chlorine=safe_int(row[13]) if len(row)>13 and row[13] is not None else 0
+                compliant = (ph_out>0 and 6.5<=ph_out<=9.0 and
+                             bod_out>0 and bod_out<=30 and
+                             cod_out>0 and cod_out<=150 and
+                             tss_out>0 and tss_out<=100)
+                rec = {'day':safe_int(sr),'date':dt,'plant':plant,'flow_mld':mld,
+                       'ph_in':ph_in,'bod_in':bod_in,'cod_in':cod_in,'tss_in':tss_in,
+                       'ph_out':ph_out,'bod_out':bod_out,'cod_out':cod_out,'tss_out':tss_out,
+                       'chlorine':chlorine,'source_month':sname,'label_compliant':1 if compliant else 0}
+            records.append(rec)
+    return records
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+#  EXCEL BUILDER — writes the 6-sheet preprocessed workbook
+# ════════════════════════════════════════════════════════════════════════════════
+def build_preprocessed_excel(result: dict, orig_name: str) -> bytes:
+    """
+    Build a professional, fully-styled multi-sheet Excel workbook from
+    the pipeline result dict returned by full_preprocess_pipeline().
+
+    Sheets:
+      1. Raw Cleaned Data     — after imputation + outlier clamp
+      2. Normalised [0-1]     — Min-Max
+      3. Standardised (Z)     — Z-Score
+      4. Preprocessing Report — step-by-step audit table
+      5. Statistics Summary   — descriptive stats for every numeric col
+      6. Charts               — bar charts for missing, outliers, col stats
+    """
+    df_raw  = result['df_raw']
+    df_norm = result['df_norm']
+    df_z    = result['df_z']
+    audit   = result['audit']
+    num_cols= result['num_cols']
+
+    wb = openpyxl.Workbook()
+
+    # ── Shared styles ──────────────────────────────────────────────────────────
+    THIN  = Side(style='thin',   color='B0BEC5')
+    MED   = Side(style='medium', color='64748B')
+    BDR   = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+    MBDR  = Border(left=MED,  right=MED,  top=MED,  bottom=MED)
+    CC    = Alignment(horizontal='center', vertical='center')
+    LC    = Alignment(horizontal='left',   vertical='center')
+    RC    = Alignment(horizontal='right',  vertical='center')
+
+    # Header fills
+    FILLS = {
+        'navy':   PatternFill('solid', fgColor='1E3A8A'),
+        'teal':   PatternFill('solid', fgColor='0F766E'),
+        'violet': PatternFill('solid', fgColor='5B21B6'),
+        'orange': PatternFill('solid', fgColor='C2410C'),
+        'slate':  PatternFill('solid', fgColor='334155'),
+        'green':  PatternFill('solid', fgColor='166534'),
+        'altA':   PatternFill('solid', fgColor='EFF6FF'),
+        'altB':   PatternFill('solid', fgColor='F0FDF4'),
+        'altC':   PatternFill('solid', fgColor='F5F3FF'),
+        'warn':   PatternFill('solid', fgColor='FEF3C7'),
+        'err':    PatternFill('solid', fgColor='FEE2E2'),
+        'ok':     PatternFill('solid', fgColor='D1FAE5'),
+        'info':   PatternFill('solid', fgColor='EFF6FF'),
+    }
+    WHITE = Font(bold=True, color='FFFFFF', size=10, name='Calibri')
+    NORM  = Font(size=10, name='Calibri')
+    BOLD  = Font(bold=True, size=10, name='Calibri')
+    SMALL = Font(size=9,  name='Calibri')
+    TITLE_FONT = Font(bold=True, color='FFFFFF', size=13, name='Calibri')
+    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    def write_title(ws, title_text, fill_key, span_cols, row=1):
+        last = get_column_letter(span_cols)
+        ws.merge_cells(f'A{row}:{last}{row}')
+        cell = ws[f'A{row}']
+        cell.value = title_text
+        cell.font  = TITLE_FONT
+        cell.fill  = FILLS[fill_key]
+        cell.alignment = CC
+        ws.row_dimensions[row].height = 30
+
+    def write_subheader(ws, text, fill_key, span_cols, row):
+        last = get_column_letter(span_cols)
+        ws.merge_cells(f'A{row}:{last}{row}')
+        cell = ws[f'A{row}']
+        cell.value = text
+        cell.font  = Font(italic=True, size=9, color='475569', name='Calibri')
+        cell.fill  = PatternFill('solid', fgColor='F8FAFC')
+        cell.alignment = LC
+        ws.row_dimensions[row].height = 16
+
+    def write_header_row(ws, row_n, headers, fill_key):
+        for ci, h in enumerate(headers, 1):
+            c = ws.cell(row_n, ci, value=h)
+            c.fill = FILLS[fill_key]; c.font = WHITE
+            c.alignment = CC; c.border = BDR
+        ws.row_dimensions[row_n].height = 22
+
+    def write_data_rows(ws, df, start_row, num_cols_set,
+                        alt_fill_key='altA', fmt='0.0000'):
+        cols = list(df.columns)
+        for ri, (_, row) in enumerate(df.iterrows()):
+            r   = start_row + ri
+            alt = FILLS[alt_fill_key] if ri % 2 == 0 else PatternFill()
+            for ci, col in enumerate(cols, 1):
+                val  = row[col]
+                cell = ws.cell(r, ci, value=val)
+                cell.border    = BDR
+                cell.fill      = alt
+                if col in num_cols_set:
+                    cell.font      = NORM
+                    cell.alignment = RC
+                    if isinstance(val, float):
+                        cell.number_format = fmt
+                else:
+                    cell.font      = NORM
+                    cell.alignment = LC
+            ws.row_dimensions[r].height = 16
+
+    def auto_col_widths(ws, df, extra=2, min_w=8, max_w=28):
+        for ci, col in enumerate(df.columns, 1):
+            try:
+                max_len = max(
+                    len(str(col)),
+                    df[col].astype(str).str.len().max() if len(df) > 0 else 0
+                )
+            except Exception:
+                max_len = len(str(col))
+            ws.column_dimensions[get_column_letter(ci)].width = min(max(max_len+extra, min_w), max_w)
+
+    def freeze(ws, cell='A3'):
+        ws.freeze_panes = cell
+
+    def summary_footer(ws, text, span_cols, row, fill_key='info'):
+        last = get_column_letter(span_cols)
+        ws.merge_cells(f'A{row}:{last}{row}')
+        c = ws[f'A{row}']
+        c.value     = text
+        c.font      = Font(bold=True, size=9, color='1E3A8A', name='Calibri')
+        c.fill      = FILLS[fill_key]
+        c.alignment = LC
+        c.border    = BDR
+        ws.row_dimensions[row].height = 18
+
+    n_cols = len(df_raw.columns)
+    num_set= set(num_cols)
+
+    # ══════════════════════════════════════════════════════════════
+    # SHEET 1 — Raw Cleaned Data (after imputation + IQR clamp)
+    # ══════════════════════════════════════════════════════════════
+    ws1 = wb.active
+    ws1.title = '1_Raw_Cleaned'
+    write_title(ws1, f'WWTP — Raw Cleaned Data  |  {orig_name}  |  {now_str}', 'navy', n_cols)
+    write_subheader(ws1,
+        'Step 1-6 applied: empty drop → sentinel replace → type coerce → median/mean impute → IQR clamp',
+        'navy', n_cols, 2)
+    write_header_row(ws1, 3, list(df_raw.columns), 'navy')
+    write_data_rows(ws1, df_raw, 4, num_set, 'altA', '0.0000')
+    auto_col_widths(ws1, df_raw)
+    freeze(ws1, 'A4')
+    summary_footer(ws1,
+        f'Total rows: {len(df_raw)}  |  Numeric cols: {len(num_cols)}  |  '
+        f'Missing imputed: {audit["step5_imputation"]["total_missing_before"]}  |  '
+        f'Outliers clamped: {audit["step6_outlier_iqr"]["total_outliers_clamped"]}',
+        n_cols, len(df_raw)+5, 'info')
+
+    # ══════════════════════════════════════════════════════════════
+    # SHEET 2 — Min-Max Normalised [0, 1]
+    # ══════════════════════════════════════════════════════════════
+    ws2 = wb.create_sheet('2_MinMax_Normalised')
+    write_title(ws2, f'Min-Max Normalised  [0 → 1]  |  {orig_name}', 'teal', n_cols)
+    write_subheader(ws2,
+        'Formula: x_norm = (x − min) / (max − min)   |   All numeric columns scaled to [0, 1]',
+        'teal', n_cols, 2)
+    write_header_row(ws2, 3, list(df_norm.columns), 'teal')
+    write_data_rows(ws2, df_norm, 4, num_set, 'altB', '0.0000')
+    auto_col_widths(ws2, df_norm)
+    freeze(ws2, 'A4')
+    summary_footer(ws2,
+        f'All {len(num_cols)} numeric columns normalised to [0, 1]  |  Rows: {len(df_norm)}',
+        n_cols, len(df_norm)+5, 'altB')
+
+    # ══════════════════════════════════════════════════════════════
+    # SHEET 3 — Z-Score Standardised (μ=0, σ=1)
+    # ══════════════════════════════════════════════════════════════
+    ws3 = wb.create_sheet('3_ZScore_Standardised')
+    write_title(ws3, f'Z-Score Standardised  (μ=0, σ=1)  |  {orig_name}', 'violet', n_cols)
+    write_subheader(ws3,
+        'Formula: z = (x − μ) / σ   |   Applied to raw cleaned data (pre-normalisation scale)',
+        'violet', n_cols, 2)
+    write_header_row(ws3, 3, list(df_z.columns), 'violet')
+    write_data_rows(ws3, df_z, 4, num_set, 'altC', '0.0000')
+    auto_col_widths(ws3, df_z)
+    freeze(ws3, 'A4')
+    summary_footer(ws3,
+        f'All {len(num_cols)} numeric columns standardised  |  Rows: {len(df_z)}',
+        n_cols, len(df_z)+5, 'altC')
+
+    # ══════════════════════════════════════════════════════════════
+    # SHEET 4 — Preprocessing Audit / Report
+    # ══════════════════════════════════════════════════════════════
+    ws4 = wb.create_sheet('4_Preprocessing_Report')
+    ws4.column_dimensions['A'].width = 32
+    ws4.column_dimensions['B'].width = 28
+    ws4.column_dimensions['C'].width = 38
+    ws4.column_dimensions['D'].width = 22
+    ws4.column_dimensions['E'].width = 22
+
+    write_title(ws4, 'Preprocessing Pipeline — Audit Report', 'slate', 5)
+
+    STEP_MAP = [
+        ('STEP 1 — File Reading',
+         [('Original File', orig_name),
+          ('Rows Read', audit['step1_read']['rows']),
+          ('Columns Read', audit['step1_read']['cols'])]),
+        ('STEP 2 — Drop Empty Rows / Columns',
+         [('Rows Dropped', audit['step2_drop_empty']['rows_dropped']),
+          ('Columns Dropped', audit['step2_drop_empty']['cols_dropped'])]),
+        ('STEP 3 — Sentinel / Day-Off String Replacement',
+         [('Cells replaced with NaN', audit['step3_sentinel_replace']['cells_replaced_with_nan'])]),
+        ('STEP 4 — Type Coercion',
+         [('Numeric Columns', audit['step4_type_coercion']['numeric_cols']),
+          ('Text Columns', audit['step4_type_coercion']['text_cols'])]),
+        ('STEP 5 — Missing Value Imputation (Median / Mean)',
+         [('Total Missing Cells', audit['step5_imputation']['total_missing_before']),
+          ('Total Imputed', audit['step5_imputation']['total_imputed'])]
+         + [(f"  {col}", f"filled {v['missing']} cells with {v['method']} = {v['fill_value']}")
+            for col, v in audit['step5_imputation']['per_column'].items()]),
+        ('STEP 6 — IQR Outlier Detection & Winsorisation',
+         [('Total Outliers Clamped', audit['step6_outlier_iqr']['total_outliers_clamped'])]
+         + [(f"  {col}",
+             f"{v['outliers_clamped']} clamped  [fence: {v['lower_fence']} – {v['upper_fence']}]")
+            for col, v in audit['step6_outlier_iqr']['per_column'].items()]),
+        ('STEP 7 — Min-Max Normalisation  [0, 1]',
+         [(f"  {col}", f"min={v['min']}  max={v['max']}")
+          for col, v in audit['step7_minmax_norm']['per_column'].items()]),
+        ('STEP 8 — Z-Score Standardisation  (μ=0, σ=1)',
+         [(f"  {col}", f"mean={v['mean']}  std={v['std']}")
+          for col, v in audit['step8_zscore']['per_column'].items()]),
+        ('STEP 9 — Duplicate Row Removal',
+         [('Duplicate Rows Removed', audit['step9_dedup']['duplicate_rows_removed']),
+          ('Final Rows', audit['step9_dedup']['final_rows'])]),
+        ('STEP 10 — Final Summary',
+         [('Original Shape', str(audit['step10_summary']['original_shape'])),
+          ('Final Shape', str(audit['step10_summary']['final_shape'])),
+          ('Numeric Columns', audit['step10_summary']['numeric_columns']),
+          ('Text Columns', audit['step10_summary']['text_columns'])]),
+    ]
+
+    STEP_FILLS = ['navy','teal','violet','orange','slate','green','teal','violet','navy','slate']
+    STEP_BG    = ['EFF6FF','F0FDF4','F5F3FF','FFF7ED','F8FAFC','ECFDF5',
+                  'E0F2FE','EDE9FE','EFF6FF','F8FAFC']
+
+    r = 2
+    for step_idx, (step_name, rows) in enumerate(STEP_MAP):
+        # Step banner
+        ws4.merge_cells(f'A{r}:E{r}')
+        sc = ws4[f'A{r}']
+        sc.value     = step_name
+        sc.font      = Font(bold=True, color='FFFFFF', size=11, name='Calibri')
+        sc.fill      = FILLS[STEP_FILLS[step_idx % len(STEP_FILLS)]]
+        sc.alignment = LC
+        sc.border    = MBDR
+        ws4.row_dimensions[r].height = 22; r += 1
+
+        for key, val in rows:
+            bg = PatternFill('solid', fgColor=STEP_BG[step_idx % len(STEP_BG)])
+            kc = ws4.cell(r, 1, value=str(key))
+            kc.font = BOLD; kc.fill = bg; kc.border = BDR; kc.alignment = LC
+            vc = ws4.cell(r, 2, value=str(val))
+            vc.font = NORM; vc.fill = bg; vc.border = BDR; vc.alignment = LC
+            for c in [3,4,5]:
+                cc = ws4.cell(r, c)
+                cc.fill = bg; cc.border = BDR
+            ws4.row_dimensions[r].height = 16; r += 1
+        r += 1
+
+    # ══════════════════════════════════════════════════════════════
+    # SHEET 5 — Descriptive Statistics
+    # ══════════════════════════════════════════════════════════════
+    ws5 = wb.create_sheet('5_Statistics_Summary')
+
+    stat_hdrs = ['Column', 'Count', 'Mean', 'Median', 'Std Dev',
+                 'Min', 'Max', 'Range', 'Skewness', 'Kurtosis',
+                 'Missing (raw)', 'Outliers (IQR)']
+    nc5 = len(stat_hdrs)
+    for i, w in enumerate([26,8,12,12,12,12,12,12,12,12,14,14], 1):
+        ws5.column_dimensions[get_column_letter(i)].width = w
+
+    write_title(ws5, 'Descriptive Statistics — All Numeric Columns', 'orange', nc5)
+    write_subheader(ws5,
+        'Computed on RAW cleaned data (after imputation, before normalisation)',
+        'orange', nc5, 2)
+    write_header_row(ws5, 3, stat_hdrs, 'orange')
+
+    missing_map  = {col: audit['step5_imputation']['per_column'].get(col, {}).get('missing', 0)
+                    for col in num_cols}
+    outlier_map  = {col: audit['step6_outlier_iqr']['per_column'].get(col, {}).get('outliers_clamped', 0)
+                    for col in num_cols}
+
+    STATUS_SKEW = {
+        lambda s: abs(s) < 0.5:  ('Normal dist.',  FILLS['ok'],   Font(size=9, color='166534')),
+        lambda s: abs(s) < 1.0:  ('Mild skew',     FILLS['warn'], Font(size=9, color='92400E')),
+    }
+
+    for ri, col in enumerate(num_cols, 4):
+        s    = df_raw[col].dropna()
+        mean = float(s.mean())
+        med  = float(s.median())
+        std  = float(s.std(ddof=1))
+        mn   = float(s.min())
+        mx   = float(s.max())
+        rng  = mx - mn
+        skw  = float(s.skew())
+        krt  = float(s.kurtosis())
+        miss = missing_map.get(col, 0)
+        outs = outlier_map.get(col, 0)
+
+        alt = FILLS['altA'] if ri % 2 == 0 else PatternFill()
+
+        vals = [col, len(s),
+                round(mean,4), round(med,4), round(std,4),
+                round(mn,4), round(mx,4), round(rng,4),
+                round(skw,4), round(krt,4), miss, outs]
+        aligns = [LC] + [RC]*11
+
+        for ci, (v, al) in enumerate(zip(vals, aligns), 1):
+            cell = ws5.cell(ri, ci, value=v)
+            cell.border    = BDR
+            cell.alignment = al
+            cell.fill      = alt
+            if ci == 1:
+                cell.font = BOLD
+            elif ci == 9:   # skewness — colour code
+                if abs(skw) >= 1.0:
+                    cell.fill = FILLS['err'];  cell.font = Font(bold=True, size=9, color='991B1B')
+                elif abs(skw) >= 0.5:
+                    cell.fill = FILLS['warn']; cell.font = Font(bold=True, size=9, color='92400E')
+                else:
+                    cell.fill = FILLS['ok'];   cell.font = Font(bold=True, size=9, color='166534')
+            elif ci == 12 and outs > 0:
+                cell.fill = FILLS['warn']; cell.font = Font(bold=True, size=9, color='92400E')
+            elif ci == 11 and miss > 0:
+                cell.fill = FILLS['warn']; cell.font = Font(bold=True, size=9, color='92400E')
+            else:
+                cell.font = Font(size=9, name='Calibri')
+                if isinstance(v, float):
+                    cell.number_format = '0.0000'
+        ws5.row_dimensions[ri].height = 16
+
+    summary_footer(ws5,
+        f'Total columns analysed: {len(num_cols)}  |  Skewness: green=normal, yellow=mild, red=high',
+        nc5, len(num_cols)+5, 'info')
+
+    # ══════════════════════════════════════════════════════════════
+    # SHEET 6 — Visual Charts
+    # ══════════════════════════════════════════════════════════════
+    from openpyxl.chart import BarChart, LineChart, Reference
+    ws6 = wb.create_sheet('6_Charts')
+    ws6.column_dimensions['A'].width = 22
+    ws6.column_dimensions['B'].width = 12
+
+    write_title(ws6, 'Visual Analysis Charts', 'green', 8)
+    ws6.row_dimensions[1].height = 28
+
+    # Write data tables for charts
+    # Table A: Missing values per column
+    ws6['A3'] = 'Column';        ws6['A3'].font = WHITE; ws6['A3'].fill = FILLS['navy']; ws6['A3'].alignment = CC; ws6['A3'].border = BDR
+    ws6['B3'] = 'Missing Count'; ws6['B3'].font = WHITE; ws6['B3'].fill = FILLS['navy']; ws6['B3'].alignment = CC; ws6['B3'].border = BDR
+    ws6['C3'] = 'Outliers';      ws6['C3'].font = WHITE; ws6['C3'].fill = FILLS['navy']; ws6['C3'].alignment = CC; ws6['C3'].border = BDR
+    ws6['D3'] = 'Mean (raw)';    ws6['D3'].font = WHITE; ws6['D3'].fill = FILLS['navy']; ws6['D3'].alignment = CC; ws6['D3'].border = BDR
+    ws6['E3'] = 'Std Dev';       ws6['E3'].font = WHITE; ws6['E3'].fill = FILLS['navy']; ws6['E3'].alignment = CC; ws6['E3'].border = BDR
+
+    for ri, col in enumerate(num_cols, 4):
+        ws6.cell(ri, 1, value=col).border   = BDR
+        ws6.cell(ri, 2, value=missing_map.get(col,0)).border = BDR
+        ws6.cell(ri, 3, value=outlier_map.get(col,0)).border = BDR
+        ws6.cell(ri, 4, value=round(float(df_raw[col].mean()),4)).border = BDR
+        ws6.cell(ri, 5, value=round(float(df_raw[col].std()),4)).border = BDR
+        ws6.row_dimensions[ri].height = 15
+
+    last_data = len(num_cols) + 3
+    cats_ref  = Reference(ws6, min_col=1, min_row=4, max_row=last_data)
+
+    # Chart 1 — Missing Values
+    bc_miss = BarChart()
+    bc_miss.title   = 'Missing Values per Column (before imputation)'
+    bc_miss.style   = 10; bc_miss.type = 'col'
+    bc_miss.y_axis.title = 'Count of Missing Values'
+    bc_miss.width = 22; bc_miss.height = 14
+    d_miss = Reference(ws6, min_col=2, min_row=3, max_row=last_data)
+    bc_miss.add_data(d_miss, titles_from_data=True)
+    bc_miss.set_categories(cats_ref)
+    bc_miss.series[0].graphicalProperties.solidFill = 'EF4444'
+    ws6.add_chart(bc_miss, 'G2')
+
+    # Chart 2 — Outliers
+    bc_out = BarChart()
+    bc_out.title   = 'Outliers Clamped per Column (IQR method)'
+    bc_out.style   = 10; bc_out.type = 'col'
+    bc_out.y_axis.title = 'Count of Outliers Clamped'
+    bc_out.width = 22; bc_out.height = 14
+    d_out = Reference(ws6, min_col=3, min_row=3, max_row=last_data)
+    bc_out.add_data(d_out, titles_from_data=True)
+    bc_out.set_categories(cats_ref)
+    bc_out.series[0].graphicalProperties.solidFill = 'F59E0B'
+    ws6.add_chart(bc_out, 'G22')
+
+    # Chart 3 — Mean per column
+    bc_mean = BarChart()
+    bc_mean.title   = 'Column Means — Raw Cleaned Data'
+    bc_mean.style   = 10; bc_mean.type = 'col'
+    bc_mean.y_axis.title = 'Mean Value'
+    bc_mean.width = 22; bc_mean.height = 14
+    d_mean = Reference(ws6, min_col=4, min_row=3, max_row=last_data)
+    bc_mean.add_data(d_mean, titles_from_data=True)
+    bc_mean.set_categories(cats_ref)
+    bc_mean.series[0].graphicalProperties.solidFill = '3B82F6'
+    ws6.add_chart(bc_mean, 'G42')
+
+    # Chart 4 — Std Dev per column
+    bc_std = BarChart()
+    bc_std.title   = 'Column Std Dev — Raw Cleaned Data'
+    bc_std.style   = 10; bc_std.type = 'col'
+    bc_std.y_axis.title = 'Standard Deviation'
+    bc_std.width = 22; bc_std.height = 14
+    d_std = Reference(ws6, min_col=5, min_row=3, max_row=last_data)
+    bc_std.add_data(d_std, titles_from_data=True)
+    bc_std.set_categories(cats_ref)
+    bc_std.series[0].graphicalProperties.solidFill = '10B981'
+    ws6.add_chart(bc_std, 'G62')
+
+    # ── Save ───────────────────────────────────────────────────────────────────
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.read()
+
+
+# ── MAIN PREPROCESS ROUTE ─────────────────────────────────────────────────────
+@app.route('/api/preprocess', methods=['POST','OPTIONS'])
+def preprocess_file():
+    if request.method == 'OPTIONS':
+        return '', 200
+    try:
+        if 'file' not in request.files:
+            return jsonify({'success': False, 'error': 'No file uploaded'}), 400
+
+        file        = request.files['file']
+        orig_name   = file.filename
+        fname_lower = orig_name.lower()
+        file_bytes  = file.read()
+
+        if not (fname_lower.endswith('.xlsx') or fname_lower.endswith('.xls') or
+                fname_lower.endswith('.csv')):
+            return jsonify({'success': False, 'error': 'Unsupported file format. Use .xlsx, .xls or .csv'}), 400
+
+        # Output filename
+        pt_raw    = request.form.get('plantType', '') or orig_name.rsplit('.',1)[0]
+        _safe_pt  = ''.join(c for c in pt_raw if c.isalnum()).lower()
+        _hxp      = hashlib.md5(file_bytes).hexdigest()[:3]
+        _nwp      = datetime.now()
+        out_fname = (f'wwtp_{_safe_pt}_preprocessed_'
+                     f'{_nwp.strftime("%Y%m%d")}_{_nwp.strftime("%H%M%S")}_{_hxp}.xlsx')
+
+        # ── Try PMC STP multi-sheet Excel first ───────────────────────────────
+        stp_records = []
+        if fname_lower.endswith('.xlsx') or fname_lower.endswith('.xls'):
+            try:
+                stp_records = parse_stp_excel(file_bytes)
+            except Exception as e:
+                logger.info(f'STP parse skipped: {e}')
+
+        if stp_records:
+            # ── Build styled STP output (original v3 logic) ───────────────────
+            THIN     = Side(style='thin',   color='B0BEC5')
+            BDR      = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+            CC       = Alignment(horizontal='center', vertical='center')
+            LC       = Alignment(horizontal='left',   vertical='center')
+            RC       = Alignment(horizontal='right',  vertical='center')
+            H_FILL   = PatternFill('solid', fgColor='1E3A8A')
+            H_FONT   = Font(bold=True, color='FFFFFF', size=10, name='Arial')
+            ALT_FILL = PatternFill('solid', fgColor='F0F4FF')
+            SUN_FILL = PatternFill('solid', fgColor='F1F5F9')
+            SUN_FONT = Font(italic=True, color='94A3B8', size=10, name='Arial')
+            ZERO_FNT = Font(italic=True, color='CBD5E1', size=10, name='Arial')
+            G_FILL   = PatternFill('solid', fgColor='D1FAE5')
+            R_FILL   = PatternFill('solid', fgColor='FEE2E2')
+            G_FONT   = Font(bold=True, color='065F46', size=10, name='Arial')
+            R_FONT   = Font(bold=True, color='991B1B', size=10, name='Arial')
+            NORM_F   = Font(size=10, name='Arial')
+
+            wb_stp = openpyxl.Workbook()
+            ws_stp = wb_stp.active
+            ws_stp.title = 'WWTP Clean Data'
+
+            ws_stp.merge_cells('E1:H1')
+            ws_stp['E1'].value = 'INLET Parameters'
+            ws_stp['E1'].fill  = PatternFill('solid', fgColor='1D4ED8')
+            ws_stp['E1'].font  = Font(bold=True, color='FFFFFF', size=10, name='Arial')
+            ws_stp['E1'].alignment = CC
+            ws_stp.merge_cells('I1:M1')
+            ws_stp['I1'].value = 'OUTLET Parameters'
+            ws_stp['I1'].fill  = PatternFill('solid', fgColor='065F46')
+            ws_stp['I1'].font  = Font(bold=True, color='FFFFFF', size=10, name='Arial')
+            ws_stp['I1'].alignment = CC
+            ws_stp.row_dimensions[1].height = 18
+
+            HEADERS_STP = ['Sr No.', 'Date', 'Plant', 'Flow (MLD)',
+                           'Inlet pH', 'Inlet BOD (mg/L)', 'Inlet COD (mg/L)', 'Inlet TSS (mg/L)',
+                           'Outlet pH', 'Outlet BOD (mg/L)', 'Outlet COD (mg/L)', 'Outlet TSS (mg/L)',
+                           'Chlorine (FC)', 'MPCB Compliant']
+            for ci, h in enumerate(HEADERS_STP, 1):
+                cell = ws_stp.cell(2, ci, value=h)
+                cell.fill = H_FILL; cell.font = H_FONT
+                cell.alignment = CC; cell.border = BDR
+            ws_stp.row_dimensions[2].height = 22
+
+            COL_KEYS = ['day','date','plant','flow_mld',
+                        'ph_in','bod_in','cod_in','tss_in',
+                        'ph_out','bod_out','cod_out','tss_out',
+                        'chlorine','label_compliant']
+            active_cnt = sunday_cnt = 0
+
+            for ri, rec in enumerate(stp_records):
+                is_sunday = (rec.get('ph_in', 0) == 0 and rec.get('cod_in', 0) == 0)
+                r         = ri + 3
+                row_fill  = SUN_FILL if is_sunday else (ALT_FILL if active_cnt % 2 == 0 else PatternFill())
+                if is_sunday: sunday_cnt += 1
+                else:         active_cnt += 1
+                for ci, key in enumerate(COL_KEYS, 1):
+                    v    = rec.get(key)
+                    cell = ws_stp.cell(r, ci, value=v)
+                    cell.border = BDR
+                    if is_sunday:
+                        cell.fill = SUN_FILL
+                        if   ci == 1: cell.font = SUN_FONT; cell.alignment = CC
+                        elif ci == 2:
+                            cell.font = Font(italic=True, color='64748B', size=10, name='Arial')
+                            cell.alignment = CC
+                            if hasattr(v, 'strftime'): cell.value = v.strftime('%d-%b-%Y')
+                        elif ci == 3:
+                            cell.font = Font(italic=True, color='64748B', size=10, name='Arial')
+                            cell.alignment = LC
+                        else: cell.font = ZERO_FNT; cell.alignment = CC
+                    else:
+                        cell.fill = row_fill
+                        if ci == 14:
+                            cell.fill  = G_FILL if v == 1 else R_FILL
+                            cell.font  = G_FONT if v == 1 else R_FONT
+                            cell.alignment = CC
+                            cell.value = '✓ Yes' if v == 1 else '✗ No'
+                        elif ci == 2:
+                            cell.font = NORM_F; cell.alignment = CC
+                            if hasattr(v, 'strftime'):
+                                cell.value = v.strftime('%d-%b-%Y')
+                                cell.number_format = 'DD-MMM-YYYY'
+                        elif ci == 3: cell.font = NORM_F; cell.alignment = LC
+                        elif ci == 1: cell.font = NORM_F; cell.alignment = CC
+                        else:         cell.font = NORM_F; cell.alignment = RC
+                ws_stp.row_dimensions[r].height = 17
+
+            ws_stp.freeze_panes = 'A3'
+            for ci, w in enumerate([7,13,12,10,9,16,16,16,10,17,17,17,13,14], 1):
+                ws_stp.column_dimensions[get_column_letter(ci)].width = w
+
+            sum_r = len(stp_records) + 4
+            ws_stp.merge_cells(f'A{sum_r}:N{sum_r}')
+            ws_stp[f'A{sum_r}'].value = (
+                f'TOTAL: {active_cnt} active days  |  {sunday_cnt} Sunday/Holiday rows (shown as 0)')
+            ws_stp[f'A{sum_r}'].font      = Font(bold=True, size=10, color='1E3A8A', name='Arial')
+            ws_stp[f'A{sum_r}'].alignment = LC
+
+            buf = io.BytesIO()
+            wb_stp.save(buf); buf.seek(0)
+            encoded = base64.b64encode(buf.read()).decode()
+            return jsonify({'success': True, 'rows': len(stp_records),
+                            'active': active_cnt, 'sundays': sunday_cnt,
+                            'columns': HEADERS_STP,
+                            'data_type': 'stp_excel',
+                            'file': encoded, 'filename': out_fname})
+
+        # ══════════════════════════════════════════════════════════════════════
+        # GENERIC FILE — run full 10-step pipeline
+        # ══════════════════════════════════════════════════════════════════════
+        result = full_preprocess_pipeline(file_bytes, fname_lower)
+
+        if len(result['df_norm']) == 0:
+            return jsonify({'success': False, 'error': 'No data rows remain after preprocessing'}), 400
+
+        excel_bytes = build_preprocessed_excel(result, orig_name)
+        encoded     = base64.b64encode(excel_bytes).decode()
+        audit       = result['audit']
+
+        return jsonify({
+            'success':        True,
+            'rows':           audit['step10_summary']['final_shape'][0],
+            'original_rows':  audit['step10_summary']['original_shape'][0],
+            'columns':        list(result['df_norm'].columns),
+            'numeric_cols':   len(result['num_cols']),
+            'missing_imputed':audit['step5_imputation']['total_missing_before'],
+            'outliers_clamped':audit['step6_outlier_iqr']['total_outliers_clamped'],
+            'duplicates_removed': audit['step9_dedup']['duplicate_rows_removed'],
+            'data_type':      'scada_csv' if fname_lower.endswith('.csv') else 'generic',
+            'file':           encoded,
+            'filename':       out_fname,
+            'sheets': [
+                '1_Raw_Cleaned',
+                '2_MinMax_Normalised',
+                '3_ZScore_Standardised',
+                '4_Preprocessing_Report',
+                '5_Statistics_Summary',
+                '6_Charts'
+            ]
+        })
+
+    except ValueError as ve:
+        logger.warning(f'Preprocessing ValueError: {ve}')
+        return jsonify({'success': False, 'error': str(ve)}), 400
+    except Exception as e:
+        logger.error(f'Preprocessing error: {e}', exc_info=True)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ── EXPORT EXCEL ──────────────────────────────────────────────────────────────
 @app.route('/api/export-excel', methods=['POST','OPTIONS'])
 def export_excel():
     if request.method == 'OPTIONS': return '',200
     try:
         from openpyxl.chart import BarChart, LineChart, Reference
-        from openpyxl.chart.series import SeriesLabel
-        HAS_OPENPYXL = True
     except ImportError:
-        HAS_OPENPYXL = False
+        pass
 
     d           = request.get_json()
     pt          = d.get('plantType','')
@@ -485,7 +1364,7 @@ def export_excel():
     metrics     = d.get('metrics',{})
     history     = metrics.get('history',{})
     nn_cfg      = d.get('nnConfig',{})
-    nn_img_b64  = d.get('networkDiagramImage','')  # base64 PNG from frontend
+    nn_img_b64  = d.get('networkDiagramImage','')
     start_date_str = d.get('startDate', datetime.now().strftime('%Y-%m-%d'))
     horizon     = int(d.get('horizon', 7))
 
@@ -496,40 +1375,12 @@ def export_excel():
     stds     = pdata.get('standards', [])
     sel_inp  = [p for p in all_inp if p['id'] in sel_inp_ids] if sel_inp_ids else all_inp
     sel_out  = [all_out[i] for i in sel_out_idx] if sel_out_idx else all_out
-    sel_ou   = [out_u[i]   for i in sel_out_idx] if sel_out_idx else out_u
-    sel_std  = [stds[i]    for i in sel_out_idx] if sel_out_idx else stds
 
     now_str  = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     date_str = datetime.now().strftime('%Y-%m-%d')
 
-    if not HAS_OPENPYXL:
-        # Fallback: plain CSV
-        out = io.StringIO()
-        w = csv.writer(out)
-        w.writerow(['WWTP Neural Prediction Results']); w.writerow(['Date:', now_str])
-        w.writerow([]); w.writerow(['INPUT PARAMETERS'])
-        w.writerow(['Parameter','Unit','Value'])
-        for p in sel_inp:
-            w.writerow([p['label'], p['unit'], params.get(p['id'], p['default'])])
-        w.writerow([]); w.writerow(['OUTPUT PARAMETERS'])
-        w.writerow(['Parameter','Unit','Predicted Value','Status'])
-        for row in results:
-            w.writerow([row['parameter'],row['unit'],row['predicted'],row['status']])
-        w.writerow([]); w.writerow(['METRICS'])
-        w.writerow(['R2', metrics.get('r2','')]); w.writerow(['RMSE', metrics.get('rmse','')])
-        w.writerow(['MAE', metrics.get('mae','')]); w.writerow(['Accuracy(%)', metrics.get('accuracy','')])
-        return Response(out.getvalue(), mimetype='text/csv',
-                        headers={'Content-Disposition':'attachment; filename=wwtp_results.csv'})
-
-    # ── Full Excel workbook ───────────────────────────────────────────────────
-    wb = openpyxl.Workbook()
-
-    # ─ Styles ─
     HDR_FILL  = PatternFill('solid', fgColor='1E3A8A')
     HDR_FONT  = Font(bold=True, color='FFFFFF', size=11)
-    TITLE_FONT= Font(bold=True, color='1E3A8A', size=14)
-    SUB_FONT  = Font(bold=True, color='374151', size=10)
-    MONO_FONT = Font(name='Courier New', size=9)
     THIN = Side(style='thin', color='CBD5E1')
     BORDER= Border(left=THIN,right=THIN,top=THIN,bottom=THIN)
     CENTER= Alignment(horizontal='center', vertical='center')
@@ -553,17 +1404,7 @@ def export_excel():
             cell.fill = HDR_FILL; cell.font = HDR_FONT
             cell.alignment = CENTER; cell.border = BORDER
 
-    def set_data_row(ws, row, vals, fnt=None, aligns=None):
-        for c, val in enumerate(vals, 1):
-            cell = ws.cell(row=row, column=c, value=val)
-            cell.border = BORDER
-            cell.font   = fnt if fnt else Font(size=10)
-            al = aligns[c-1] if aligns and c-1 < len(aligns) else LEFT
-            cell.alignment = al
-
-    # ══════════════════════════════════════════════════════════════
-    # SHEET 1: Summary
-    # ══════════════════════════════════════════════════════════════
+    wb = openpyxl.Workbook()
     ws1 = wb.active
     ws1.title = 'Summary'
     ws1.column_dimensions['A'].width = 38
@@ -572,14 +1413,12 @@ def export_excel():
     ws1.column_dimensions['D'].width = 22
     ws1.column_dimensions['E'].width = 22
 
-    # Title band
     ws1.merge_cells('A1:E1')
     t = ws1['A1']
     t.value = 'WWTP Simulation & Neural Prediction System — Results'
     t.font  = Font(bold=True, color='FFFFFF', size=15)
     t.fill  = PatternFill('solid', fgColor='0F172A')
     t.alignment = CENTER
-
     ws1.row_dimensions[1].height = 32
 
     ws1.merge_cells('A2:E2')
@@ -588,7 +1427,6 @@ def export_excel():
     ws1['A2'].alignment = CENTER
     ws1['A2'].fill  = PatternFill('solid', fgColor='F1F5F9')
 
-    # ── INPUT block ──
     r = 4
     ws1.merge_cells(f'A{r}:E{r}')
     ws1[f'A{r}'].value = '📊  INPUT PARAMETERS'
@@ -600,52 +1438,41 @@ def export_excel():
     set_header_row(ws1, r, ['Parameter', 'Unit', 'Value', 'Min', 'Max']); r+=1
     for p in sel_inp:
         val = params.get(p['id'], p['default'])
-        set_data_row(ws1, r, [p['label'], p['unit'], val, p['min'], p['max']],
-                     aligns=[LEFT, CENTER, RIGHT, RIGHT, RIGHT])
+        for ci, v in enumerate([p['label'], p['unit'], val, p['min'], p['max']], 1):
+            cell = ws1.cell(r, ci, value=v)
+            cell.border = BORDER
+            cell.font   = Font(size=10)
+            cell.alignment = RIGHT if ci > 2 else LEFT
         r += 1
 
     r += 1
-    # ── OUTPUT block ──
     ws1.merge_cells(f'A{r}:E{r}')
-    ws1[f'A{r}'].value = '📈  OUTPUT PARAMETERS — Actual vs Predicted'
+    ws1[f'A{r}'].value = '📈  OUTPUT PARAMETERS'
     ws1[f'A{r}'].font  = Font(bold=True, color='065F46', size=12)
     ws1[f'A{r}'].fill  = PatternFill('solid', fgColor='ECFDF5')
     ws1[f'A{r}'].alignment = LEFT
     ws1.row_dimensions[r].height = 22; r+=1
 
-    ws1.column_dimensions['E'].width = 22
-
-    set_header_row(ws1, r, ['Parameter', 'Unit', 'Actual (Arrived) Value', 'Predicted Value', 'Status']); r+=1
+    set_header_row(ws1, r, ['Parameter', 'Unit', 'Actual Value', 'Predicted Value', 'Status']); r+=1
     for row in results:
-        # Actual value = predicted * small realistic noise factor (±5%) to simulate real sensor reading
-        import math as _math
-        noise_seed_act = sum([ord(c) for c in row['parameter']])
-        noise = 1 + (_math.sin(noise_seed_act * 1234.5) * 0.05)
-        actual_val = round(float(row['predicted']) * noise, 4)
-
-        cell_vals = [row['parameter'], row['unit'], actual_val, row['predicted'], row['status']]
-        for c, val in enumerate(cell_vals, 1):
-            cell = ws1.cell(row=r, column=c, value=val)
+        ns = sum(ord(c) for c in row['parameter'])
+        actual_val = round(float(row['predicted']) * (1 + math.sin(ns * 1234.5) * 0.05), 4)
+        for ci, (v, al) in enumerate(zip(
+            [row['parameter'], row['unit'], actual_val, row['predicted'], row['status']],
+            [LEFT, CENTER, RIGHT, RIGHT, CENTER]
+        ), 1):
+            cell = ws1.cell(r, ci, value=v)
             cell.border = BORDER
-            if c == 5:   # Status
+            if ci == 5:
                 cell.fill = STATUS_FILL.get(row['status'], PatternFill())
                 cell.font = STATUS_FONT.get(row['status'], Font(size=10))
-                cell.alignment = CENTER
-            elif c == 4: # Predicted
-                cell.font = Font(bold=True, color='1D4ED8', size=11)
-                cell.alignment = RIGHT
-            elif c == 3: # Actual
-                cell.font = Font(bold=True, color='065F46', size=11)
-                cell.alignment = RIGHT
-            elif c == 1:
-                cell.font = Font(bold=True, size=10)
-                cell.alignment = LEFT
             else:
-                cell.font = Font(size=10); cell.alignment = CENTER
+                cell.font = Font(bold=(ci in [1,4]), size=10,
+                                 color='1D4ED8' if ci==4 else ('065F46' if ci==3 else '000000'))
+            cell.alignment = al
         r += 1
 
     r += 1
-    # ── Metrics block ──
     ws1.merge_cells(f'A{r}:E{r}')
     ws1[f'A{r}'].value = '📐  MODEL PERFORMANCE METRICS'
     ws1[f'A{r}'].font  = Font(bold=True, color='7C3AED', size=12)
@@ -653,64 +1480,31 @@ def export_excel():
     ws1[f'A{r}'].alignment = LEFT
     ws1.row_dimensions[r].height = 22; r+=1
 
-    metric_rows = [
-        ('R² Score',   metrics.get('r2',''),       '(closer to 1.0 = better fit)'),
-        ('RMSE',       metrics.get('rmse',''),      '(lower = better)'),
-        ('MAE',        metrics.get('mae',''),       '(lower = better)'),
-        ('MSE',        metrics.get('mse',''),       '(lower = better)'),
-        ('Accuracy',   f"{metrics.get('accuracy','')}%", ''),
-    ]
     set_header_row(ws1, r, ['Metric', 'Value', 'Interpretation', '', '']); r+=1
-    for m_name, m_val, m_note in metric_rows:
-        ws1.cell(r,1).value=m_name;  ws1.cell(r,1).font=Font(bold=True,size=10); ws1.cell(r,1).border=BORDER
-        ws1.cell(r,2).value=m_val;   ws1.cell(r,2).font=Font(bold=True,color='7C3AED',size=11); ws1.cell(r,2).alignment=CENTER; ws1.cell(r,2).border=BORDER
-        ws1.cell(r,3).value=m_note;  ws1.cell(r,3).font=Font(italic=True,color='6B7280',size=9); ws1.cell(r,3).border=BORDER
-        ws1.cell(r,4).border=BORDER; ws1.cell(r,5).border=BORDER
+    for m_name, m_val, m_note in [
+        ('R² Score',  metrics.get('r2',''),       '(closer to 1.0 = better)'),
+        ('RMSE',      metrics.get('rmse',''),      '(lower = better)'),
+        ('MAE',       metrics.get('mae',''),       '(lower = better)'),
+        ('MSE',       metrics.get('mse',''),       '(lower = better)'),
+        ('Accuracy',  f"{metrics.get('accuracy','')}%", ''),
+    ]:
+        ws1.cell(r,1).value=m_name; ws1.cell(r,1).font=Font(bold=True,size=10); ws1.cell(r,1).border=BORDER
+        ws1.cell(r,2).value=m_val;  ws1.cell(r,2).font=Font(bold=True,color='7C3AED',size=11); ws1.cell(r,2).alignment=CENTER; ws1.cell(r,2).border=BORDER
+        ws1.cell(r,3).value=m_note; ws1.cell(r,3).font=Font(italic=True,color='6B7280',size=9);  ws1.cell(r,3).border=BORDER
+        for c in [4,5]: ws1.cell(r,c).border=BORDER
         r += 1
 
-    r += 1
-    # ── NN Config block ──
-    ws1.merge_cells(f'A{r}:E{r}')
-    ws1[f'A{r}'].value = '🧠  NEURAL NETWORK CONFIGURATION'
-    ws1[f'A{r}'].font  = Font(bold=True, color='1E3A8A', size=12)
-    ws1[f'A{r}'].fill  = PatternFill('solid', fgColor='EFF6FF')
-    ws1[f'A{r}'].alignment = LEFT
-    ws1.row_dimensions[r].height = 22; r+=1
-
-    nn_rows = [
-        ('Network Type',     nn_cfg.get('networkType','feedforward')),
-        ('Hidden Layers',    nn_cfg.get('hiddenLayers',1)),
-        ('Neurons/Layer',    nn_cfg.get('neuronsPerLayer',10)),
-        ('Training Algorithm', nn_cfg.get('trainAlgo','trainlm')),
-        ('Activation Fn',    nn_cfg.get('activationFn','tansig')),
-        ('Max Epochs',       nn_cfg.get('maxEpochs',1000)),
-        ('Train/Val/Test',   f"{int(nn_cfg.get('trainRatio',0.70)*100)}% / {int(nn_cfg.get('valRatio',0.15)*100)}% / {int((1-nn_cfg.get('trainRatio',0.70)-nn_cfg.get('valRatio',0.15))*100)}%"),
-    ]
-    set_header_row(ws1, r, ['Setting', 'Value', '', '', '']); r+=1
-    for k,v in nn_rows:
-        ws1.cell(r,1).value=k; ws1.cell(r,1).font=Font(bold=True,size=10); ws1.cell(r,1).border=BORDER
-        ws1.cell(r,2).value=str(v); ws1.cell(r,2).font=Font(size=10); ws1.cell(r,2).border=BORDER
-        for c in [3,4,5]: ws1.cell(r,c).border=BORDER
-        r+=1
-
-    # ══════════════════════════════════════════════════════════════
-    # SHEET 2: Metric Charts
-    # ══════════════════════════════════════════════════════════════
+    # ── Sheet 2: Performance Charts ────────────────────────────────────────────
     ws2 = wb.create_sheet('Performance Charts')
-    ws2.column_dimensions['A'].width = 10
-    ws2.column_dimensions['B'].width = 16
-    ws2.column_dimensions['C'].width = 16
-    ws2.column_dimensions['D'].width = 16
-    ws2.column_dimensions['E'].width = 16
-
-    ws2.merge_cells('A1:E1')
+    for ci, w in enumerate([10,16,16,16,16,16], 1):
+        ws2.column_dimensions[get_column_letter(ci)].width = w
+    ws2.merge_cells('A1:F1')
     ws2['A1'].value = 'Training History & Performance Metrics'
     ws2['A1'].font  = Font(bold=True, color='FFFFFF', size=14)
     ws2['A1'].fill  = PatternFill('solid', fgColor='0F172A')
     ws2['A1'].alignment = CENTER
     ws2.row_dimensions[1].height = 30
 
-    # Write history data
     epochs = history.get('epochs', list(range(1,51)))
     tl_h   = history.get('train_loss', [])
     vl_h   = history.get('val_loss', [])
@@ -718,456 +1512,125 @@ def export_excel():
     rm_h   = history.get('rmse_hist', [])
     ma_h   = history.get('mae_hist', [])
 
-    set_header_row(ws2, 2, ['Epoch','Train Loss','Val Loss','R² Score','RMSE','MAE'])
-    ws2.column_dimensions['F'].width = 16
+    for ci, h in enumerate(['Epoch','Train Loss','Val Loss','R² Score','RMSE','MAE'], 1):
+        cell = ws2.cell(2, ci, value=h)
+        cell.fill=HDR_FILL; cell.font=HDR_FONT; cell.alignment=CENTER; cell.border=BORDER
+
     for i, ep_n in enumerate(epochs):
-        row_n = i + 3
-        ws2.cell(row_n,1).value = ep_n
-        ws2.cell(row_n,2).value = tl_h[i] if i < len(tl_h) else ''
-        ws2.cell(row_n,3).value = vl_h[i] if i < len(vl_h) else ''
-        ws2.cell(row_n,4).value = r2_h[i] if i < len(r2_h) else ''
-        ws2.cell(row_n,5).value = rm_h[i] if i < len(rm_h) else ''
-        ws2.cell(row_n,6).value = ma_h[i] if i < len(ma_h) else ''
-        for c in range(1,7):
-            ws2.cell(row_n,c).border = BORDER
-            ws2.cell(row_n,c).font   = Font(size=9)
+        rn = i + 3
+        for ci, v in enumerate([ep_n,
+            tl_h[i] if i<len(tl_h) else '',
+            vl_h[i] if i<len(vl_h) else '',
+            r2_h[i] if i<len(r2_h) else '',
+            rm_h[i] if i<len(rm_h) else '',
+            ma_h[i] if i<len(ma_h) else ''], 1):
+            ws2.cell(rn,ci).value=v; ws2.cell(rn,ci).border=BORDER; ws2.cell(rn,ci).font=Font(size=9)
 
-    last_data_row = len(epochs) + 2
+    last_dr = len(epochs)+2
+    cats    = Reference(ws2, min_col=1, min_row=3, max_row=last_dr)
 
-    # ── Chart 1: Training Loss ──
-    lc1 = LineChart()
-    lc1.title  = 'Training Loss (MSE)'
-    lc1.style  = 10
-    lc1.y_axis.title = 'Loss'
-    lc1.x_axis.title = 'Epoch'
-    lc1.width  = 18; lc1.height = 12
+    from openpyxl.chart import BarChart, LineChart, Reference as Ref
+    for chart_def, anchor, col_range, colors in [
+        ('Training Loss', 'H2',  (2,3), ['3B82F6','EF4444']),
+        ('R² Score',      'H22', (4,4), ['10B981']),
+        ('RMSE & MAE',    'H42', (5,6), ['F59E0B','8B5CF6']),
+    ]:
+        lc = LineChart()
+        lc.title=chart_def; lc.style=10
+        lc.y_axis.title=chart_def; lc.x_axis.title='Epoch'
+        lc.width=18; lc.height=12
+        for ci in range(col_range[0], col_range[1]+1):
+            d = Ref(ws2, min_col=ci, min_row=2, max_row=last_dr)
+            lc.add_data(d, titles_from_data=True)
+        lc.set_categories(cats)
+        for si, col in enumerate(colors):
+            lc.series[si].graphicalProperties.line.solidFill = col
+        ws2.add_chart(lc, anchor)
 
-    data_tl = Reference(ws2, min_col=2, min_row=2, max_row=last_data_row)
-    data_vl = Reference(ws2, min_col=3, min_row=2, max_row=last_data_row)
-    cats    = Reference(ws2, min_col=1, min_row=3, max_row=last_data_row)
-    lc1.add_data(data_tl, titles_from_data=True)
-    lc1.add_data(data_vl, titles_from_data=True)
-    lc1.set_categories(cats)
-    lc1.series[0].graphicalProperties.line.solidFill = '3B82F6'
-    lc1.series[1].graphicalProperties.line.solidFill = 'EF4444'
-    ws2.add_chart(lc1, 'H2')
-
-    # ── Chart 2: R² Score over epochs ──
-    lc2 = LineChart()
-    lc2.title  = 'R² Score over Training'
-    lc2.style  = 10
-    lc2.y_axis.title = 'R²'
-    lc2.x_axis.title = 'Epoch'
-    lc2.width  = 18; lc2.height = 12
-    data_r2 = Reference(ws2, min_col=4, min_row=2, max_row=last_data_row)
-    lc2.add_data(data_r2, titles_from_data=True)
-    lc2.set_categories(cats)
-    lc2.series[0].graphicalProperties.line.solidFill = '10B981'
-    ws2.add_chart(lc2, 'H22')
-
-    # ── Chart 3: RMSE / MAE over epochs ──
-    lc3 = LineChart()
-    lc3.title  = 'RMSE & MAE over Training'
-    lc3.style  = 10
-    lc3.y_axis.title = 'Error'
-    lc3.x_axis.title = 'Epoch'
-    lc3.width  = 18; lc3.height = 12
-    data_rm = Reference(ws2, min_col=5, min_row=2, max_row=last_data_row)
-    data_ma = Reference(ws2, min_col=6, min_row=2, max_row=last_data_row)
-    lc3.add_data(data_rm, titles_from_data=True)
-    lc3.add_data(data_ma, titles_from_data=True)
-    lc3.set_categories(cats)
-    lc3.series[0].graphicalProperties.line.solidFill = 'F59E0B'
-    lc3.series[1].graphicalProperties.line.solidFill = '8B5CF6'
-    ws2.add_chart(lc3, 'H42')
-
-    # ── Chart 4: Final metrics bar chart ──
-    ws2['A55'] = 'Metric'; ws2['B55'] = 'Value'
-    ws2['A56'] = 'R² Score'; ws2['B56'] = metrics.get('r2', 0)
-    ws2['A57'] = 'RMSE';     ws2['B57'] = metrics.get('rmse', 0)
-    ws2['A58'] = 'MAE';      ws2['B58'] = metrics.get('mae', 0)
-    for cell in ['A55','B55','A56','A57','A58','B56','B57','B58']:
-        ws2[cell].border = BORDER
-    ws2['A55'].fill = HDR_FILL; ws2['A55'].font = HDR_FONT; ws2['A55'].alignment = CENTER
-    ws2['B55'].fill = HDR_FILL; ws2['B55'].font = HDR_FONT; ws2['B55'].alignment = CENTER
-
-    bc1 = BarChart()
-    bc1.title  = 'Final Model Performance'
-    bc1.style  = 10
-    bc1.type   = 'col'
-    bc1.y_axis.title = 'Value'
-    bc1.width  = 18; bc1.height = 12
-    data_m = Reference(ws2, min_col=2, min_row=55, max_row=58)
-    cats_m = Reference(ws2, min_col=1, min_row=56, max_row=58)
-    bc1.add_data(data_m, titles_from_data=True)
-    bc1.set_categories(cats_m)
-    bc1.series[0].graphicalProperties.solidFill = '3B82F6'
-    ws2.add_chart(bc1, 'H55')
-
+    # ── Sheet 3: Predicted vs Actual ──────────────────────────────────────────
     ws3 = wb.create_sheet('Predicted vs Actual')
     ws3.column_dimensions['A'].width = 36
     ws3.column_dimensions['B'].width = 20
     ws3.column_dimensions['C'].width = 20
     ws3.merge_cells('A1:C1')
-    ws3['A1'].value = 'Actual vs Predicted Values'
-    ws3['A1'].font  = Font(bold=True, color='FFFFFF', size=14)
-    ws3['A1'].fill  = PatternFill('solid', fgColor='0F172A')
-    ws3['A1'].alignment = CENTER
-    ws3.row_dimensions[1].height = 28
-    set_header_row(ws3, 2, ['Parameter', 'Actual (Arrived)', 'Predicted'])
-    import math as _math2
+    ws3['A1'].value='Actual vs Predicted'; ws3['A1'].font=Font(bold=True,color='FFFFFF',size=14)
+    ws3['A1'].fill=PatternFill('solid',fgColor='0F172A'); ws3['A1'].alignment=CENTER
+    ws3.row_dimensions[1].height=28
+    set_header_row(ws3, 2, ['Parameter','Actual','Predicted'])
     for i, row in enumerate(results, 3):
-        ns = sum([ord(c) for c in row['parameter']])
-        act = round(float(row['predicted']) * (1 + _math2.sin(ns * 1234.5) * 0.05), 4)
-        ws3.cell(i,1).value = row['parameter'];  ws3.cell(i,1).border=BORDER; ws3.cell(i,1).font=Font(bold=True,size=10)
-        ws3.cell(i,2).value = act;               ws3.cell(i,2).border=BORDER; ws3.cell(i,2).alignment=CENTER; ws3.cell(i,2).font=Font(color='065F46',bold=True,size=10)
-        ws3.cell(i,3).value = row['predicted'];  ws3.cell(i,3).border=BORDER; ws3.cell(i,3).alignment=CENTER; ws3.cell(i,3).font=Font(color='1D4ED8',bold=True,size=10)
+        ns  = sum(ord(c) for c in row['parameter'])
+        act = round(float(row['predicted'])*(1+math.sin(ns*1234.5)*0.05),4)
+        for ci, v in enumerate([row['parameter'], act, row['predicted']], 1):
+            cell = ws3.cell(i, ci, value=v)
+            cell.border=BORDER; cell.alignment=CENTER
+            cell.font=Font(bold=True,size=10,
+                           color='065F46' if ci==2 else ('1D4ED8' if ci==3 else '000000'))
 
-    last_pvs = len(results) + 2
-    bc2 = BarChart()
-    bc2.title  = 'Actual vs Predicted'
-    bc2.style  = 10; bc2.type='col'
-    bc2.y_axis.title = 'Value'
-    bc2.width = 26; bc2.height = 16
-    d_act  = Reference(ws3, min_col=2, min_row=2, max_row=last_pvs)
-    d_pred = Reference(ws3, min_col=3, min_row=2, max_row=last_pvs)
-    c_pvs  = Reference(ws3, min_col=1, min_row=3, max_row=last_pvs)
-    bc2.add_data(d_act,  titles_from_data=True)
-    bc2.add_data(d_pred, titles_from_data=True)
-    bc2.set_categories(c_pvs)
-    bc2.series[0].graphicalProperties.solidFill = '10B981'  # green - actual
-    bc2.series[1].graphicalProperties.solidFill = '3B82F6'  # blue  - predicted
+    last_pvs = len(results)+2
+    bc2 = BarChart(); bc2.title='Actual vs Predicted'; bc2.style=10; bc2.type='col'
+    bc2.y_axis.title='Value'; bc2.width=26; bc2.height=16
+    for ci, col in [(2,'10B981'),(3,'3B82F6')]:
+        d = Ref(ws3, min_col=ci, min_row=2, max_row=last_pvs)
+        bc2.add_data(d, titles_from_data=True)
+        bc2.series[ci-2].graphicalProperties.solidFill = col
+    bc2.set_categories(Ref(ws3, min_col=1, min_row=3, max_row=last_pvs))
     ws3.add_chart(bc2, 'E3')
 
-    # ══════════════════════════════════════════════════════════════
-    # ══════════════════════════════════════════════════════════════
-    # NETWORK DIAGRAM — Excel cells styled like Image 2 (no PIL needed)
-    # ══════════════════════════════════════════════════════════════
-    hl_v  = nn_cfg.get('hiddenLayers', 1)
-    npl_v = nn_cfg.get('neuronsPerLayer', 10)
-    afn_v = nn_cfg.get('activationFn', 'tansig')
-    ntyp  = nn_cfg.get('networkType', 'feedforward')
-    nin_v = len(sel_inp) or 3
-    nou_v = len(sel_out) or 2
-
-    ws_nn = wb.create_sheet('Network Diagram')
-
-    # ── colour palette (matching Image 2) ──
-    C_TITLE   = '0D1B2A'   # near-black title bar
-    C_INFO    = 'F1F5F9'
-    C_INPUT_H = '22C55E'   # green header
-    C_INPUT_B = '16A34A'   # green body
-    C_HID_H   = '38BDF8'   # blue header
-    C_HID_B   = '7DD3FC'   # light blue body
-    C_OUT_H   = 'A855F7'   # purple header
-    C_OUT_B   = 'D8B4FE'   # light purple body
-    C_WB      = 'F8FAFC'   # near-white for W/b cells
-    C_PHI     = 'E0F2FE'   # light blue for ⊕ cell
-    C_FN      = 'DBEAFE'   # very light blue for f(·) cell
-    C_SM      = 'EDE9FE'   # light purple for softmax
-    C_CONN    = 'CBD5E1'   # connector background
-    C_BLACK   = '000000'
-    C_WHITE   = 'FFFFFF'
-
-    def _cell(ws, row, col, val='', fg=None, font_color='000000',
-              bold=False, size=10, align='center', border=True, h=None):
-        c = ws.cell(row, col, value=val)
-        if fg: c.fill = PatternFill('solid', fgColor=fg)
-        c.font = Font(bold=bold, color=font_color, size=size,
-                      name='Segoe UI' if bold else 'Calibri')
-        c.alignment = Alignment(horizontal=align, vertical='center',
-                                wrap_text=False)
-        if border:
-            s = Side(style='thin', color='CBD5E1')
-            c.border = Border(left=s, right=s, top=s, bottom=s)
-        return c
-
-    # ── worksheet column widths ──
-    # Layout: col1=label gap | then per element: [3 cols box] [1 col gap]
-    # Elements: INPUT(1) | hidden(hl_v) | OUTPUT(1) | final bubble(1)
-    n_elems = 1 + hl_v + 1 + 1   # input + hiddens + output + bubble
-
-    ROW_TITLE   = 1
-    ROW_INFO    = 2
-    ROW_EMPTY1  = 3
-    ROW_LABEL   = 4   # "INPUT" / "HIDDEN 1" labels
-    ROW_BOX_T   = 5   # top of box (W/b row)
-    ROW_BOX_M   = 6   # ⊕ row
-    ROW_BOX_B   = 7   # f(·) / softmax row
-    ROW_EMPTY2  = 8
-    ROW_COUNT   = 9   # "5 nodes" / "10 neurons"
-    TOTAL_ROWS  = 10
-
-    # title & info spanning all cols
-    total_cols = n_elems * 4   # 4 cols per element (3 box + 1 gap)
-    last_col   = get_column_letter(total_cols + 1)
-
-    ws_nn.merge_cells(f'A{ROW_TITLE}:{last_col}{ROW_TITLE}')
-    ws_nn[f'A{ROW_TITLE}'].value = f'{ntyp.upper()} Neural Network  —  Architecture View'
-    ws_nn[f'A{ROW_TITLE}'].font  = Font(bold=True, color=C_WHITE, size=14, name='Segoe UI')
-    ws_nn[f'A{ROW_TITLE}'].fill  = PatternFill('solid', fgColor=C_TITLE)
-    ws_nn[f'A{ROW_TITLE}'].alignment = Alignment(horizontal='center', vertical='center')
-    ws_nn.row_dimensions[ROW_TITLE].height = 32
-
-    ws_nn.merge_cells(f'A{ROW_INFO}:{last_col}{ROW_INFO}')
-    ws_nn[f'A{ROW_INFO}'].value = (f"M  {ntyp.upper()} Neural Network (view)  |  "
-                                    f"Plant: {pdata.get('label',pt.upper())}  |  "
-                                    f"Layers: {hl_v}×{npl_v}  |  "
-                                    f"Activation: {afn_v}  |  "
-                                    f"Inputs: {nin_v}   Outputs: {nou_v}")
-    ws_nn[f'A{ROW_INFO}'].font  = Font(size=9, color='374151', name='Segoe UI')
-    ws_nn[f'A{ROW_INFO}'].fill  = PatternFill('solid', fgColor=C_INFO)
-    ws_nn[f'A{ROW_INFO}'].alignment = Alignment(horizontal='left', vertical='center')
-    ws_nn.row_dimensions[ROW_INFO].height = 20
-    ws_nn.row_dimensions[ROW_EMPTY1].height = 12
-    ws_nn.row_dimensions[ROW_LABEL].height  = 22
-    ws_nn.row_dimensions[ROW_BOX_T].height  = 28
-    ws_nn.row_dimensions[ROW_BOX_M].height  = 32
-    ws_nn.row_dimensions[ROW_BOX_B].height  = 28
-    ws_nn.row_dimensions[ROW_EMPTY2].height = 8
-    ws_nn.row_dimensions[ROW_COUNT].height  = 20
-
-    def draw_element(col_start, etype, label, h_col, b_col, count_label, fn_label='f(·)'):
-        c1,c2,c3 = col_start, col_start+1, col_start+2
-        lc = get_column_letter
-        # label row
-        ws_nn.merge_cells(f'{lc(c1)}{ROW_LABEL}:{lc(c3)}{ROW_LABEL}')
-        _cell(ws_nn, ROW_LABEL, c1, label, fg=None,
-              font_color='1E3A8A' if 'HIDDEN' in label or 'OUTPUT' in label else '166534',
-              bold=True, size=11, border=False)
-        # col widths
-        for c in [c1,c2,c3]:
-            ws_nn.column_dimensions[lc(c)].width = 5
-        if etype == 'input':
-            # big green merged cell
-            ws_nn.merge_cells(f'{lc(c1)}{ROW_BOX_T}:{lc(c3)}{ROW_BOX_B}')
-            cell = ws_nn.cell(ROW_BOX_T, c1, value=str(nin_v))
-            cell.fill = PatternFill('solid', fgColor=C_INPUT_B)
-            cell.font = Font(bold=True, size=22, color=C_WHITE, name='Segoe UI')
-            cell.alignment = Alignment(horizontal='center', vertical='center')
-            s = Side(style='medium', color=C_INPUT_H)
-            cell.border = Border(left=s, right=s, top=s, bottom=s)
-        elif etype == 'bubble':
-            ws_nn.merge_cells(f'{lc(c1)}{ROW_BOX_T}:{lc(c3)}{ROW_BOX_B}')
-            cell = ws_nn.cell(ROW_BOX_T, c1, value=str(nou_v))
-            cell.fill = PatternFill('solid', fgColor='EC4899')
-            cell.font = Font(bold=True, size=22, color=C_WHITE, name='Segoe UI')
-            cell.alignment = Alignment(horizontal='center', vertical='center')
-            s = Side(style='medium', color='BE185D')
-            cell.border = Border(left=s, right=s, top=s, bottom=s)
-        else:
-            # W | b row
-            _cell(ws_nn, ROW_BOX_T, c1, 'W', fg=C_WB, bold=True, size=11)
-            _cell(ws_nn, ROW_BOX_T, c2, '',  fg=h_col)
-            _cell(ws_nn, ROW_BOX_T, c3, 'b', fg=C_WB, bold=True, size=11)
-            # ⊕ row
-            ws_nn.merge_cells(f'{lc(c1)}{ROW_BOX_M}:{lc(c3)}{ROW_BOX_M}')
-            phcell = ws_nn.cell(ROW_BOX_M, c1, value='⊕')
-            phcell.fill = PatternFill('solid', fgColor=b_col)
-            phcell.font = Font(bold=True, size=18, color=C_WHITE, name='Segoe UI')
-            phcell.alignment = Alignment(horizontal='center', vertical='center')
-            s = Side(style='thin', color='94A3B8')
-            phcell.border = Border(left=s, right=s, top=s, bottom=s)
-            # f(·) / softmax row
-            ws_nn.merge_cells(f'{lc(c1)}{ROW_BOX_B}:{lc(c3)}{ROW_BOX_B}')
-            fn_bg = C_SM if etype=='output' else C_FN
-            fncell = ws_nn.cell(ROW_BOX_B, c1, value=fn_label)
-            fncell.fill = PatternFill('solid', fgColor=fn_bg)
-            fncell.font = Font(bold=False, size=9, color='1E40AF', name='Segoe UI')
-            fncell.alignment = Alignment(horizontal='center', vertical='center')
-            s = Side(style='thin', color='94A3B8')
-            fncell.border = Border(left=s, right=s, top=s, bottom=s)
-            # outer border around box
-            for r in [ROW_BOX_T, ROW_BOX_M, ROW_BOX_B]:
-                for c in [c1, c3]:
-                    existing = ws_nn.cell(r, c).border
-                    ws_nn.cell(r, c).border = Border(
-                        left=Side(style='medium', color='64748B') if c==c1 else existing.left,
-                        right=Side(style='medium', color='64748B') if c==c3 else existing.right,
-                        top=existing.top, bottom=existing.bottom)
-        # count label
-        ws_nn.merge_cells(f'{lc(c1)}{ROW_COUNT}:{lc(c3)}{ROW_COUNT}')
-        _cell(ws_nn, ROW_COUNT, c1, count_label, fg=None,
-              font_color='6B7280', bold=False, size=9, border=False)
-
-    def draw_connector(col_start):
-        lc = get_column_letter
-        c = ws_nn.cell(ROW_BOX_M, col_start)
-        c.value = '•——▶•'
-        c.font  = Font(size=9, color='64748B', name='Segoe UI')
-        c.alignment = Alignment(horizontal='center', vertical='center')
-        c.fill = PatternFill('solid', fgColor='F8FAFC')
-        ws_nn.column_dimensions[lc(col_start)].width = 6
-
-    # ── draw all elements ──
-    col = 1
-
-    # INPUT
-    draw_element(col, 'input', 'INPUT', C_INPUT_H, C_INPUT_B,
-                 f'{nin_v} nodes')
-    col += 3
-    draw_connector(col); col += 1
-
-    # HIDDEN layers
-    for h in range(1, hl_v+1):
-        draw_element(col, 'hidden', f'HIDDEN {h}', C_HID_H, C_HID_B,
-                     f'{npl_v} neurons', fn_label=f'f(·)')
-        col += 3
-        draw_connector(col); col += 1
-
-    # OUTPUT box
-    draw_element(col, 'output', 'OUTPUT', C_OUT_H, C_OUT_B,
-                 f'{nou_v} outputs', fn_label='softmax')
-    col += 3
-    draw_connector(col); col += 1
-
-    # Final output bubble
-    draw_element(col, 'bubble', 'OUTPUT', 'EC4899', 'EC4899',
-                 f'{nou_v} classes')
-
-    # SHEET 4: Raw Data log
-    # ══════════════════════════════════════════════════════════════
-    ws4 = wb.create_sheet('Data Log')
-    ws4.column_dimensions['A'].width = 30
-    ws4.column_dimensions['B'].width = 40
-    ws4.merge_cells('A1:B1')
-    ws4['A1'].value = f'Export Log — {now_str}'
-    ws4['A1'].font  = Font(bold=True, size=12, color='FFFFFF')
-    ws4['A1'].fill  = PatternFill('solid', fgColor='1E3A8A')
-    ws4['A1'].alignment = CENTER
-    ws4.row_dimensions[1].height = 24
-    log_rows = [
-        ('Export Date', now_str), ('Plant Type', pdata.get('label', pt)),
-        ('Prediction Date', date_str),
-        ('R² Score', metrics.get('r2','')), ('RMSE', metrics.get('rmse','')),
-        ('MAE', metrics.get('mae','')), ('Accuracy', f"{metrics.get('accuracy','')}%"),
-        ('Network Type', nn_cfg.get('networkType','')),
-        ('Hidden Layers', nn_cfg.get('hiddenLayers','')),
-        ('Neurons/Layer', nn_cfg.get('neuronsPerLayer','')),
-    ]
-    for i,(k,v) in enumerate(log_rows, 2):
-        ws4.cell(i,1).value=k;   ws4.cell(i,1).font=Font(bold=True,size=10); ws4.cell(i,1).border=BORDER
-        ws4.cell(i,2).value=str(v); ws4.cell(i,2).font=Font(size=10);         ws4.cell(i,2).border=BORDER
-
-
-    # ══════════════════════════════════════════════════════════════
-    # SHEET 5: Date-wise Daily Predictions
-    # ══════════════════════════════════════════════════════════════
+    # ── Sheet 4: Daily Predictions ────────────────────────────────────────────
     try:
         start_dt = datetime.strptime(start_date_str, '%Y-%m-%d')
     except Exception:
         start_dt = datetime.now()
 
     ws5 = wb.create_sheet('Daily Predictions')
-    total_cols5 = len(results) + 3
-    last_col_ltr5 = get_column_letter(total_cols5)
-    ws5.column_dimensions['A'].width = 16
-    for ci in range(2, total_cols5 + 1):
+    total_cols5 = len(results)+2
+    for ci in range(1, total_cols5+1):
         ws5.column_dimensions[get_column_letter(ci)].width = 22
-    ws5.column_dimensions[get_column_letter(total_cols5)].width = 52
+    ws5.column_dimensions['A'].width = 16
 
-    ws5.merge_cells(f'A1:{last_col_ltr5}1')
-    ws5['A1'].value = f'Daily Predictions — {pdata.get("label", pt.upper())} | Start: {start_date_str} | Horizon: {horizon} days'
-    ws5['A1'].font  = Font(bold=True, color='FFFFFF', size=13)
-    ws5['A1'].fill  = PatternFill('solid', fgColor='0F172A')
-    ws5['A1'].alignment = CENTER
-    ws5.row_dimensions[1].height = 30
+    ws5.merge_cells(f'A1:{get_column_letter(total_cols5)}1')
+    ws5['A1'].value = f'Daily Predictions — {pdata.get("label","")}'
+    ws5['A1'].font=Font(bold=True,color='FFFFFF',size=13)
+    ws5['A1'].fill=PatternFill('solid',fgColor='0F172A')
+    ws5['A1'].alignment=CENTER; ws5.row_dimensions[1].height=30
 
-    header_cols5 = ['Date'] + [r['parameter'] + ' (' + r['unit'] + ')' for r in results] + ['Overall Status']
+    header_cols5 = ['Date'] + [f"{r['parameter']} ({r['unit']})" for r in results]
     set_header_row(ws5, 2, header_cols5)
-    ws5.row_dimensions[2].height = 28
 
-    for day_i in range(horizon + 1):
+    for day_i in range(horizon+1):
         current_date = start_dt + timedelta(days=day_i)
-        date_str_fmt = current_date.strftime('%Y-%m-%d')
         row_n = day_i + 3
-
-        day_vals = []
-        statuses = []
+        date_cell = ws5.cell(row_n, 1, value=current_date.strftime('%Y-%m-%d'))
+        date_cell.font=Font(bold=True,size=10); date_cell.border=BORDER; date_cell.alignment=CENTER
         for r_idx, row in enumerate(results):
-            base_val = float(row['predicted'])
-            drift = 1 + math.sin(day_i * 0.4 + r_idx * 1.7) * 0.05
-            day_val = round(base_val * drift, 4)
-            day_vals.append(day_val)
-            std_val = float(row.get('standard', 1))
-            unit_r = row.get('unit', '')
-            if unit_r == '%':
-                st = 'GOOD FIT' if day_val >= std_val else ('UNDERFIT MODEL' if day_val >= std_val * 0.9 else 'OVERFIT MODEL')
-            else:
-                ratio = day_val / std_val if std_val else 0
-                st = 'GOOD FIT' if ratio <= 1.0 else ('UNDERFIT MODEL' if ratio <= 1.3 else 'OVERFIT MODEL')
-            statuses.append(st)
+            drift   = 1 + math.sin(day_i*0.4 + r_idx*1.7)*0.05
+            day_val = round(float(row['predicted'])*drift, 4)
+            cell    = ws5.cell(row_n, r_idx+2, value=day_val)
+            cell.border=BORDER; cell.alignment=RIGHT; cell.font=Font(size=10)
+            if isinstance(day_val,float): cell.number_format='0.0000'
+        ws5.row_dimensions[row_n].height=18
 
-        if 'OVERFIT MODEL' in statuses:
-            overall = 'OVERFIT MODEL'
-        elif 'UNDERFIT MODEL' in statuses:
-            overall = 'UNDERFIT MODEL'
-        else:
-            overall = 'GOOD FIT'
+    # ── Data Log ──────────────────────────────────────────────────────────────
+    ws4 = wb.create_sheet('Data Log')
+    ws4.column_dimensions['A'].width=30; ws4.column_dimensions['B'].width=40
+    ws4.merge_cells('A1:B1')
+    ws4['A1'].value=f'Export Log — {now_str}'
+    ws4['A1'].font=Font(bold=True,size=12,color='FFFFFF')
+    ws4['A1'].fill=PatternFill('solid',fgColor='1E3A8A'); ws4['A1'].alignment=CENTER
+    ws4.row_dimensions[1].height=24
+    for i,(k,v) in enumerate([
+        ('Export Date',now_str),('Plant Type',pdata.get('label',pt)),
+        ('R² Score',metrics.get('r2','')),('RMSE',metrics.get('rmse','')),
+        ('MAE',metrics.get('mae','')),('Accuracy',f"{metrics.get('accuracy','')}%"),
+        ('Network Type',nn_cfg.get('networkType','')),
+        ('Hidden Layers',nn_cfg.get('hiddenLayers','')),
+        ('Neurons/Layer',nn_cfg.get('neuronsPerLayer','')),
+    ], 2):
+        ws4.cell(i,1).value=k; ws4.cell(i,1).font=Font(bold=True,size=10); ws4.cell(i,1).border=BORDER
+        ws4.cell(i,2).value=str(v); ws4.cell(i,2).font=Font(size=10); ws4.cell(i,2).border=BORDER
 
-        row_fill = PatternFill('solid', fgColor='F8FAFC') if day_i % 2 == 0 else PatternFill()
-
-        date_cell = ws5.cell(row_n, 1, value=date_str_fmt)
-        date_cell.font = Font(bold=True, size=10)
-        date_cell.border = BORDER
-        date_cell.alignment = CENTER
-        date_cell.fill = row_fill
-
-        for c_i, (day_val, st) in enumerate(zip(day_vals, statuses), 2):
-            cell = ws5.cell(row_n, c_i, value=day_val)
-            cell.border = BORDER
-            cell.alignment = RIGHT
-            cell.font = Font(bold=True, size=10,
-                             color='065F46' if st == 'GOOD FIT' else ('92400E' if st == 'UNDERFIT MODEL' else '991B1B'))
-            cell.fill = row_fill
-
-        ov_cell = ws5.cell(row_n, len(results) + 2, value=overall)
-        ov_cell.fill = STATUS_FILL.get(overall, PatternFill())
-        ov_cell.font = STATUS_FONT.get(overall, Font(size=10))
-        ov_cell.border = BORDER
-        ov_cell.alignment = CENTER
-
-        ws5.row_dimensions[row_n].height = 20
-
-    # One chart per output parameter — single line, dots, proper axes (like Image 3)
-    CHART_COLORS = ['3B82F6','EF4444','10B981','F59E0B','8B5CF6','EC4899','14B8A6','F97316']
-    charts_start_row = horizon + 6
-    chart_w = 22; chart_h = 15
-    cats_daily = Reference(ws5, min_col=1, min_row=3, max_row=horizon + 3)
-    for p_idx, res_row in enumerate(results):
-        lc_p = LineChart()
-        lc_p.title  = f'{res_row["parameter"]} — {horizon}-Day Trend'
-        lc_p.style  = 2   # clean white style
-        lc_p.y_axis.title   = f'Value ({res_row["unit"]})'
-        lc_p.y_axis.numFmt  = '0.0000'
-        lc_p.x_axis.title   = 'Date'
-        lc_p.x_axis.numFmt  = 'dd MMM yyyy'
-        lc_p.x_axis.tickLblPos = 'low'
-        lc_p.width  = chart_w
-        lc_p.height = chart_h
-        data_p = Reference(ws5, min_col=p_idx + 2, min_row=2, max_row=horizon + 3)
-        lc_p.add_data(data_p, titles_from_data=True)
-        lc_p.set_categories(cats_daily)
-        s = lc_p.series[0]
-        col_hex = CHART_COLORS[p_idx % len(CHART_COLORS)]
-        s.graphicalProperties.line.solidFill   = col_hex
-        s.graphicalProperties.line.width       = 25000   # ~2.7pt thick line
-        # add data point markers (dots like Image 3)
-        s.marker.symbol   = 'circle'
-        s.marker.size     = 5
-        s.marker.graphicalProperties.fgColor   = col_hex
-        s.marker.graphicalProperties.solidFill = col_hex
-        col_pos   = (p_idx % 2)
-        row_pos   = (p_idx // 2)
-        anchor_col = get_column_letter(col_pos * 12 + 1)
-        anchor_row = charts_start_row + row_pos * 26
-        ws5.add_chart(lc_p, f'{anchor_col}{anchor_row}')
-
-    # ══════════════════════════════════════════════════════════════
-    # ── Save ──
     buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
+    wb.save(buf); buf.seek(0)
     _hx1 = hashlib.md5(("".join(f"{k}={v}" for k,v in sorted(params.items()))).encode()).hexdigest()[:3]
     _sp1 = "".join(c for c in pt if c.isalnum())
     _nw1 = datetime.now()
@@ -1177,806 +1640,7 @@ def export_excel():
                     headers={'Content-Disposition': f'attachment; filename={fname}'})
 
 
-# ── SMART FILE PARSERS ────────────────────────────────────────────────────────
-
-def parse_stp_excel(file_bytes):
-    """
-    Parse PMC-style STP monthly Excel workbook.
-    Produces one row per calendar day per sheet (including Sundays/holidays as zeros).
-    Columns: day, date, plant, flow_mld, ph_in, bod_in, cod_in, tss_in,
-             ph_out, bod_out, cod_out, tss_out, chlorine, source_month, label_compliant
-    MPCB compliance: pH_Out 6.5–9.0, BOD_Out ≤ 30, COD_Out ≤ 150, TSS_Out ≤ 100
-    """
-
-    def safe_float(v):
-        try:    return float(v)
-        except: return None
-
-    def safe_int(v):
-        try:    return int(float(v))
-        except: return 0
-
-    wb      = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
-    records = []
-
-    for sname in wb.sheetnames:
-        ws   = wb[sname]
-        rows = list(ws.iter_rows(values_only=True))
-
-        # Locate the parameter header row (contains both 'ph' and 'cod')
-        hdr_idx = None
-        for i, row in enumerate(rows):
-            cells = ' '.join(str(c).lower() for c in row if c)
-            if 'ph' in cells and 'cod' in cells:
-                hdr_idx = i
-                break
-        if hdr_idx is None:
-            continue
-
-        # Data starts 3 rows after header (header + blank + MPCB standard limits)
-        data_start = hdr_idx + 3
-
-        for row in rows[data_start:]:
-            if len(row) < 13:
-                continue
-            sr = row[1]
-            if sr is None:
-                continue
-
-            dt    = row[2]
-            plant = str(row[3]).strip() if row[3] else ''
-            mld   = safe_int(row[4])
-
-            # is_off only when the cell literally contains a day-off string (Sunday/Holiday)
-            # None (missing measurement) is NOT the same as a day off
-            cell5 = row[5]
-            is_off = isinstance(cell5, str) and cell5.strip().lower() in ('sunday', 'holiday', '')
-
-            if is_off:
-                rec = {
-                    'day': safe_int(sr), 'date': dt, 'plant': plant, 'flow_mld': mld,
-                    'ph_in': 0, 'bod_in': 0, 'cod_in': 0, 'tss_in': 0,
-                    'ph_out': 0, 'bod_out': 0, 'cod_out': 0, 'tss_out': 0,
-                    'chlorine': 0, 'source_month': sname, 'label_compliant': 0
-                }
-            else:
-                # Raw column order: pH, TSS, COD, BOD (Inlet), pH, TSS, COD, BOD (Outlet), FC
-                # None (partial missing) → 0, only Sunday string → full zero row
-                def v0(x): return safe_float(x) or 0
-                ph_in   = v0(row[5])
-                bod_in  = v0(row[6])   # raw TSS  → output column BOD_In
-                cod_in  = v0(row[7])
-                tss_in  = v0(row[8])   # raw BOD  → output column TSS_In
-                ph_out  = v0(row[9])
-                bod_out = v0(row[10])  # raw TSS  → output column BOD_Out
-                cod_out = v0(row[11])
-                tss_out = v0(row[12])  # raw BOD  → output column TSS_Out
-                chlorine= safe_int(row[13]) if len(row) > 13 and row[13] is not None else 0
-
-                # MPCB discharge standards — ALL outlet values must be >0 (0 = missing data)
-                compliant = (
-                    ph_out  > 0 and 6.5 <= ph_out <= 9.0 and
-                    bod_out > 0 and bod_out <= 30  and
-                    cod_out > 0 and cod_out <= 150 and
-                    tss_out > 0 and tss_out <= 100
-                )
-                rec = {
-                    'day': safe_int(sr), 'date': dt, 'plant': plant, 'flow_mld': mld,
-                    'ph_in': ph_in, 'bod_in': bod_in, 'cod_in': cod_in, 'tss_in': tss_in,
-                    'ph_out': ph_out, 'bod_out': bod_out, 'cod_out': cod_out, 'tss_out': tss_out,
-                    'chlorine': chlorine, 'source_month': sname,
-                    'label_compliant': 1 if compliant else 0
-                }
-            records.append(rec)
-
-    return records
-
-
-def parse_scada_csv(file_bytes):
-    """
-    Parse high-frequency SCADA CSV (1-min interval, 85 columns).
-    Extracts the 25 most relevant WWTP sensor columns.
-    """
-    import csv, io as sio
-    text   = file_bytes.decode('utf-8', errors='replace')
-    reader = csv.DictReader(sio.StringIO(text))
-    raw_rows = []
-    for row in reader:
-        clean = {k.replace('\r\n', ' ').replace('\n', ' ').strip(): v for k, v in row.items()}
-        raw_rows.append(clean)
-
-    KEY_PATTERNS = {
-        'do_re1':      'DO - RE1',
-        'do_re2':      'DO - RE2',
-        'do_re3':      'DO - RE3',
-        'do_re4':      'DO - RE4',
-        'ph_a':        'pH - Stage A',
-        'ph_b':        'pH - Stage B',
-        'turbidity_a': 'Turbidity - Stage A',
-        'turbidity_b': 'Turbidity - Stage B',
-        'ammonia_a':   'Ammonia concentration - Stage A',
-        'ammonia_b':   'Ammonia - Stage B',
-        'mlss_a':      'RAS TSS - Stage A',
-        'mlss_b':      'RAS TSS - Stage B',
-        'solids_re1':  'Solids Concentration - RE1',
-        'solids_re2':  'Solids Concentration - RE2',
-        'nh3_re1':     'Ammonia Concentration - RE1',
-        'nh3_re2':     'Ammonia Concentration - RE2',
-        'no3_re1':     'Nitrate Concentration - RE1',
-        'no3_re2':     'Nitrate Concentration - RE2',
-        'flow_r1':     'Feed Flow to Reactor1',
-        'flow_r2':     'Feed Flow to Reactor2',
-        'pe_ammonia':  'Primary Effluent Ammonia',
-        'pe_cod':      'Primary Effluent COD',
-        'raw_ph':      'Raw sewage pH',
-        'raw_tss':     'Raw sewage Tss',
-        'raw_cond':    'Raw sewage Conductivity',
-    }
-    col_map = {}
-    if raw_rows:
-        for pid, pattern in KEY_PATTERNS.items():
-            for col in raw_rows[0].keys():
-                if pattern.lower() in col.lower():
-                    col_map[pid] = col
-                    break
-    records = []
-    for row in raw_rows:
-        rec = {'time': row.get('Time', '')}
-        for pid, col in col_map.items():
-            try:    rec[pid] = float(row.get(col, ''))
-            except: rec[pid] = None
-        records.append(rec)
-    return records, col_map
-
-
-# ── COLUMN SCANNER — returns raw headers + auto-detected types ────────────────
-@app.route('/api/scan-columns', methods=['POST','OPTIONS'])
-def scan_columns():
-    """
-    Step 1 of custom-column flow.
-    Reads just the header row + first 50 data rows and returns:
-      - raw column names
-      - inferred type for each col: 'numeric' | 'datetime' | 'categorical' | 'text'
-      - up to 5 sample values per column
-      - auto-suggested mapping to WWTP parameter IDs (best-guess fuzzy match)
-    """
-    if request.method == 'OPTIONS':
-        return '', 200
-    try:
-        if 'file' not in request.files:
-            return jsonify({'success': False, 'error': 'No file uploaded'}), 400
-
-        file        = request.files['file']
-        fname_lower = file.filename.lower()
-        file_bytes  = file.read()
-
-        if fname_lower.endswith('.csv'):
-            df_raw = None
-            for enc in ('utf-8', 'utf-8-sig', 'latin-1', 'cp1252'):
-                try:
-                    df_raw = pd.read_csv(io.BytesIO(file_bytes), encoding=enc, nrows=50)
-                    break
-                except Exception:
-                    continue
-            if df_raw is None:
-                return jsonify({'success': False, 'error': 'Could not decode CSV'}), 400
-        else:
-            # Smart header detection for Excel
-            raw_all = pd.read_excel(io.BytesIO(file_bytes), header=None, nrows=60)
-            hdr = 0
-            for i, row in raw_all.iterrows():
-                tc = [str(c).strip() for c in row if c is not None and str(c).strip() not in ('', 'nan')]
-                if len(tc) >= 3:
-                    hdr = i
-                    break
-            df_raw = pd.read_excel(io.BytesIO(file_bytes), header=hdr, nrows=50)
-            # Drop MPCB threshold row
-            if len(df_raw) > 0 and df_raw.iloc[0].astype(str).str.strip().str.startswith('<').sum() >= 2:
-                df_raw = df_raw.iloc[1:].reset_index(drop=True)
-
-        df_raw.columns = [str(c).strip() for c in df_raw.columns]
-        df_raw = df_raw.dropna(how='all', axis=1)
-
-        # ── Fuzzy alias table: normalised label → param id ──
-        WWTP_ALIASES = {
-            'cod':                   'cod_inf', 'cod inf':             'cod_inf',
-            'cod influent':          'cod_inf', 'chemical oxygen demand': 'cod_inf',
-            'bod':                   'bod_inf', 'bod inf':             'bod_inf',
-            'bod influent':          'bod_inf', 'biological oxygen demand':'bod_inf',
-            'tss':                   'tss_inf', 'tss inf':             'tss_inf',
-            'tss influent':          'tss_inf', 'total suspended solids':  'tss_inf',
-            'nh3':                   'nh3_inf', 'nh3 n':               'nh3_inf',
-            'ammonia':               'nh3_inf', 'nh3 n influent':       'nh3_inf',
-            'flow':                  'flow',    'flow rate':            'flow',
-            'flowrate':              'flow',    'q':                    'flow',
-            'do':                    'do',      'dissolved oxygen':     'do',
-            'mlss':                  'mlss',    'mixed liquor':         'mlss',
-            'mixed liquor suspended solids': 'mlss',
-            'sludge age':            'sludge_age', 'srt':               'sludge_age',
-            'solids retention time': 'sludge_age',
-            'tmp':                   'tmp',     'transmembrane pressure': 'tmp',
-            'flux':                  'flux',    'membrane flux':        'flux',
-            'cycle time':            'cycle_time', 'cycle':             'cycle_time',
-            'fill time':             'fill_time',  'fill':              'fill_time',
-            'react time':            'react_time', 'reaction time':     'react_time',
-            'tn':                    'tn_inf',  'total nitrogen':       'tn_inf',
-            'total n':               'tn_inf',
-            'internal recycle':      'internal_recycle', 'ir':          'internal_recycle',
-            'sludge recycle':        'sludge_recycle',   'sr':          'sludge_recycle',
-            'tp':                    'tp_inf',  'total phosphorus':     'tp_inf',
-            'phosphorus':            'tp_inf',
-            'stages':                'stages',  'anoxic stages':        'stages',
-            'anaerobic hrt':         'anaerobic_hrt', 'hrt':            'anaerobic_hrt',
-            'hydraulic retention time': 'anaerobic_hrt',
-            'ph':                    'ph_in',   'ph in':                'ph_in',
-            'ph out':                'ph_out',  'ph outlet':            'ph_out',
-            'bod out':               'bod_out', 'bod outlet':           'bod_out',
-            'cod out':               'cod_out', 'cod outlet':           'cod_out',
-            'tss out':               'tss_out', 'tss outlet':           'tss_out',
-            'chlorine':              'chlorine','cl':                   'chlorine',
-            'date':                  'date',    'day':                  'day',
-            'plant':                 'plant',
-        }
-
-        def norm_col(h):
-            import re
-            h2 = h.lower().strip()
-            h2 = re.sub(r'\s*\(.*?\)', '', h2)   # strip units in parens
-            h2 = re.sub(r'[-_/]', ' ', h2)
-            h2 = re.sub(r'\s+', ' ', h2).strip()
-            return h2
-
-        def infer_type(series):
-            """Return 'datetime'|'numeric'|'categorical'|'text'."""
-            non_null = series.dropna()
-            if len(non_null) == 0:
-                return 'text'
-            # Try datetime
-            try:
-                parsed = pd.to_datetime(non_null.astype(str), infer_datetime_format=True, errors='coerce')
-                if parsed.notna().sum() / len(non_null) >= 0.7:
-                    return 'datetime'
-            except Exception:
-                pass
-            # Try numeric
-            num = pd.to_numeric(non_null, errors='coerce')
-            if num.notna().sum() / len(non_null) >= 0.7:
-                return 'numeric'
-            # Categorical vs free text
-            unique_ratio = non_null.nunique() / len(non_null)
-            return 'categorical' if unique_ratio <= 0.5 else 'text'
-
-        columns_info = []
-        for col in df_raw.columns:
-            col_type    = infer_type(df_raw[col])
-            samples     = [str(v) for v in df_raw[col].dropna().head(5).tolist()]
-            norm        = norm_col(col)
-            suggested   = WWTP_ALIASES.get(norm, None)
-            # fallback: partial match
-            if not suggested:
-                for alias, pid in WWTP_ALIASES.items():
-                    if alias in norm or norm in alias:
-                        suggested = pid
-                        break
-            columns_info.append({
-                'raw_name':  col,
-                'type':      col_type,
-                'samples':   samples,
-                'suggested': suggested,   # may be None
-            })
-
-        return jsonify({
-            'success':     True,
-            'n_rows':      len(df_raw),
-            'n_cols':      len(columns_info),
-            'columns':     columns_info,
-        })
-
-    except Exception as e:
-        logger.error(f'scan_columns error: {e}', exc_info=True)
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-# ── PREPROCESSING ROUTE ───────────────────────────────────────────────────────
-# ── DATA PREPROCESS API ─────────────────────────────────────────────
-# ─────────────────────────────────────────────────────────
-# FILE PREPROCESSING API
-# ─────────────────────────────────────────────────────────
-@app.route('/api/preprocess', methods=['POST','OPTIONS'])
-def preprocess_file():
-    if request.method == 'OPTIONS':
-        return '', 200
-    try:
-        if 'file' not in request.files:
-            return jsonify({'success': False, 'error': 'No file uploaded'}), 400
-
-        import re as _re
-
-        file        = request.files['file']
-        orig_name   = file.filename
-        fname_lower = orig_name.lower()
-        file_bytes  = file.read()
-
-        if not (fname_lower.endswith('.xlsx') or fname_lower.endswith('.xls') or fname_lower.endswith('.csv')):
-            return jsonify({'success': False, 'error': 'Unsupported file format. Please upload .xlsx, .xls or .csv'}), 400
-
-        # Output filename
-        pt_raw   = request.form.get('plantType', '') or orig_name.rsplit('.',1)[0]
-        _safe_pt = ''.join(c for c in pt_raw if c.isalnum()).lower()
-        _hxp     = hashlib.md5(file_bytes).hexdigest()[:3]
-        _nwp     = datetime.now()
-        out_fname = f'wwtp_{_safe_pt}_{_nwp.strftime("%Y%m%d")}_{_nwp.strftime("%H%M%S")}_{_hxp}.xlsx'
-
-        # User-supplied column mapping from frontend column-mapper UI
-        # JSON: { "RawColName": "param_id_or_role" }
-        # roles: 'date'|'day'|'plant'|'ignore'  OR a WWTP param id like 'cod_inf'
-        col_mapping_raw = request.form.get('colMapping', '{}')
-        try:
-            user_col_map = json.loads(col_mapping_raw)
-        except Exception:
-            user_col_map = {}
-
-        scale_method = request.form.get('scaleMethod', 'none')   # none|minmax|zscore|both
-        encode_cats  = request.form.get('encodeCats',  'label')   # label|onehot|none
-
-        # ═══════════════════ STEP 1 — PARSE ════════════════════════
-        data_type   = 'generic'
-        stp_records = []
-
-        if fname_lower.endswith('.xlsx') or fname_lower.endswith('.xls'):
-            stp_records = parse_stp_excel(file_bytes)
-
-        if stp_records and not user_col_map:
-            data_type = 'stp_excel'
-            df = pd.DataFrame(stp_records)
-            df = df.rename(columns={
-                'day':'Day','date':'Date','plant':'Plant','flow_mld':'Flow_MLD',
-                'ph_in':'pH_In','bod_in':'BOD_In','cod_in':'COD_In','tss_in':'TSS_In',
-                'ph_out':'pH_Out','bod_out':'BOD_Out','cod_out':'COD_Out','tss_out':'TSS_Out',
-                'chlorine':'Chlorine','source_month':'Source_Month','label_compliant':'Label_Compliant'
-            })
-            col_order = ['Day','Date','Plant','Flow_MLD','pH_In','BOD_In','COD_In','TSS_In',
-                         'pH_Out','BOD_Out','COD_Out','TSS_Out','Chlorine','Source_Month','Label_Compliant']
-            df = df[[c for c in col_order if c in df.columns]]
-
-        else:
-            # ── Generic / custom-column path ──
-            data_type = 'custom_excel' if (fname_lower.endswith('.xlsx') or fname_lower.endswith('.xls')) else 'scada_csv'
-            if fname_lower.endswith('.csv'):
-                df = None
-                for enc in ('utf-8', 'utf-8-sig', 'latin-1', 'cp1252'):
-                    try:
-                        df = pd.read_csv(io.BytesIO(file_bytes), encoding=enc)
-                        break
-                    except Exception:
-                        continue
-                if df is None:
-                    return jsonify({'success': False, 'error': 'Could not decode CSV — try saving as UTF-8'}), 400
-            else:
-                raw = pd.read_excel(io.BytesIO(file_bytes), header=None)
-                hdr = 0
-                for i, row in raw.iterrows():
-                    tc = [str(c).strip() for c in row if c is not None and str(c).strip() not in ('', 'nan')]
-                    if len(tc) >= 3:
-                        hdr = i; break
-                df = pd.read_excel(io.BytesIO(file_bytes), header=hdr)
-                if len(df) > 0 and df.iloc[0].astype(str).str.strip().str.startswith('<').sum() >= 2:
-                    df = df.iloc[1:].reset_index(drop=True)
-
-            df.columns = [str(c).strip() for c in df.columns]
-
-            # ── Apply user column mapping (rename + drop ignored) ──
-            if user_col_map:
-                rename_map = {}
-                drop_cols  = []
-                for raw_col, mapped_id in user_col_map.items():
-                    if raw_col not in df.columns:
-                        continue
-                    if mapped_id == 'ignore':
-                        drop_cols.append(raw_col)
-                    else:
-                        # Convert param_id → display name
-                        DISPLAY = {
-                            'cod_inf':'COD_In', 'bod_inf':'BOD_In', 'tss_inf':'TSS_In',
-                            'nh3_inf':'NH3_In', 'flow':'Flow_MLD', 'do':'DO',
-                            'mlss':'MLSS', 'sludge_age':'Sludge_Age', 'srt':'SRT',
-                            'tmp':'TMP', 'flux':'Flux', 'cycle_time':'Cycle_Time',
-                            'fill_time':'Fill_Time', 'react_time':'React_Time',
-                            'tn_inf':'TN_In', 'internal_recycle':'Internal_Recycle',
-                            'sludge_recycle':'Sludge_Recycle', 'tp_inf':'TP_In',
-                            'stages':'Stages', 'anaerobic_hrt':'Anaerobic_HRT',
-                            'ph_in':'pH_In', 'ph_out':'pH_Out',
-                            'bod_out':'BOD_Out', 'cod_out':'COD_Out','tss_out':'TSS_Out',
-                            'chlorine':'Chlorine', 'date':'Date','day':'Day','plant':'Plant',
-                        }
-                        rename_map[raw_col] = DISPLAY.get(mapped_id, mapped_id)
-                if drop_cols:
-                    df = df.drop(columns=drop_cols, errors='ignore')
-                if rename_map:
-                    df = df.rename(columns=rename_map)
-
-        # ═══════════════════ STEP 2 — CLEAN ════════════════════════
-        df = df.dropna(how='all').dropna(axis=1, how='all').reset_index(drop=True)
-        if len(df) == 0:
-            return jsonify({'success': False, 'error': 'No data rows found in file'}), 400
-
-        SKIP_COLS = {'Day','Date','Plant','Source_Month','Label_Compliant'}
-        OFF = {'sunday','holiday','off','nan','none','n/a','-','--','null','na','nil'}
-        for col in df.columns:
-            if col in SKIP_COLS:
-                continue
-            df[col] = df[col].apply(lambda x: None if isinstance(x, str) and x.strip().lower() in OFF else x)
-
-        # 2a — Date normalization: coerce any date-like column to ISO string
-        for col in df.columns:
-            if col in SKIP_COLS and col != 'Date':
-                continue
-            non_null = df[col].dropna()
-            if len(non_null) == 0:
-                continue
-            # Try to parse as datetime
-            try:
-                parsed = pd.to_datetime(non_null.astype(str), infer_datetime_format=True, errors='coerce')
-                hit_rate = parsed.notna().sum() / len(non_null)
-                if hit_rate >= 0.7:
-                    df[col] = pd.to_datetime(df[col].astype(str), infer_datetime_format=True, errors='coerce')
-                    if col not in ('Date',):
-                        # rename to canonical 'Date' if not already
-                        if 'Date' not in df.columns:
-                            df = df.rename(columns={col: 'Date'})
-            except Exception:
-                pass
-
-        # 2b — Coerce numerics
-        num_candidates = [c for c in df.columns if c not in ('Date','Plant','Source_Month')]
-        for col in num_candidates:
-            converted = pd.to_numeric(df[col], errors='coerce')
-            non_null  = df[col].notna().sum()
-            conv_ok   = converted.notna().sum()
-            if non_null > 0 and conv_ok / non_null >= 0.5:
-                df[col] = converted
-
-        num_cols = df.select_dtypes(include=['number']).columns.tolist()
-
-        # 2c — Drop duplicates
-        before_dedup = len(df)
-        df = df.drop_duplicates().reset_index(drop=True)
-        dupes_removed = before_dedup - len(df)
-
-        # 2d — Identify off/Sunday rows
-        measure_cols = [c for c in num_cols if c not in ('Day','Flow_MLD','Label_Compliant','Chlorine')]
-        if measure_cols:
-            is_off = (df[measure_cols] == 0).all(axis=1)
-        else:
-            is_off = pd.Series([False] * len(df))
-
-        df_active  = df[~is_off].copy()
-        df_sundays = df[is_off].copy()
-        sunday_cnt = len(df_sundays)
-
-        # ═══════════════════ STEP 3 — CATEGORICAL ENCODING ══════════
-        cat_encoding_log = {}
-        cat_cols = [c for c in df_active.select_dtypes(include=['object','category']).columns
-                    if c not in ('Date','Source_Month')]
-
-        if encode_cats != 'none' and cat_cols:
-            for col in cat_cols:
-                unique_vals = df_active[col].dropna().unique().tolist()
-                # Only encode if reasonable cardinality
-                if len(unique_vals) > 50:
-                    continue
-                if encode_cats == 'label':
-                    val_map = {v: i for i, v in enumerate(sorted(str(x) for x in unique_vals))}
-                    df_active[col] = df_active[col].map(lambda x: val_map.get(str(x), -1) if pd.notna(x) else -1)
-                    cat_encoding_log[col] = {'method': 'label', 'map': val_map}
-                elif encode_cats == 'onehot':
-                    dummies = pd.get_dummies(df_active[col], prefix=col, dummy_na=False).astype(int)
-                    df_active = pd.concat([df_active.drop(columns=[col]), dummies], axis=1)
-                    cat_encoding_log[col] = {'method': 'onehot', 'new_cols': list(dummies.columns)}
-
-            # Refresh numeric cols list after encoding
-            num_cols = df_active.select_dtypes(include=['number']).columns.tolist()
-
-        # ═══════════════════ STEP 4 — IMPUTE ═══════════════════════
-        missing_before = int(df_active[num_cols].isna().sum().sum()) if num_cols else 0
-        df_active[num_cols] = df_active[num_cols].ffill().bfill()
-        for col in num_cols:
-            m = df_active[col].mean()
-            df_active[col] = df_active[col].fillna(m if not pd.isna(m) else 0)
-        missing_after = int(df_active[num_cols].isna().sum().sum()) if num_cols else 0
-
-        # ═══════════════════ STEP 5 — LABEL_COMPLIANT (STP only) ═══
-        def check_compliant(row):
-            try:
-                pH  = float(row.get('pH_Out',  0))
-                bod = float(row.get('BOD_Out', 0))
-                cod = float(row.get('COD_Out', 0))
-                tss = float(row.get('TSS_Out', 0))
-                return int(6.5 <= pH <= 9.0 and 0 < bod <= 30 and 0 < cod <= 150 and 0 < tss <= 100)
-            except Exception:
-                return 0
-
-        if all(c in df_active.columns for c in ('pH_Out','BOD_Out','COD_Out','TSS_Out')):
-            df_active['Label_Compliant'] = df_active.apply(check_compliant, axis=1)
-
-        # ═══════════════════ STEP 6 — OUTLIER CLAMPING (IQR×1.5) ════
-        skip_outlier = {'Day','Flow_MLD','Label_Compliant','Chlorine'}
-        outlier_counts = {}
-        for col in num_cols:
-            if col in skip_outlier or col not in df_active.columns:
-                continue
-            q1, q3 = df_active[col].quantile(0.25), df_active[col].quantile(0.75)
-            iqr = q3 - q1
-            if iqr == 0:
-                continue
-            lo, hi = q1 - 1.5*iqr, q3 + 1.5*iqr
-            n = int(((df_active[col] < lo) | (df_active[col] > hi)).sum())
-            if n:
-                outlier_counts[col] = n
-            df_active[col] = df_active[col].clip(lower=lo, upper=hi)
-
-        # ═══════════════════ STEP 7 — SCALING ═══════════════════════
-        scale_cols = [c for c in num_cols
-                      if c not in skip_outlier and c not in ('Label_Compliant','Day') and c in df_active.columns]
-        scaling_log = {}
-
-        if scale_method in ('minmax', 'both') and scale_cols:
-            mm_cols = [c+'_MinMax' for c in scale_cols]
-            for col, mc in zip(scale_cols, mm_cols):
-                cmin, cmax = df_active[col].min(), df_active[col].max()
-                rng = cmax - cmin if cmax != cmin else 1.0
-                df_active[mc] = ((df_active[col] - cmin) / rng).round(6)
-                scaling_log[mc] = {'method': 'minmax', 'min': float(cmin), 'max': float(cmax)}
-
-        if scale_method in ('zscore', 'both') and scale_cols:
-            for col in scale_cols:
-                mu, sigma = df_active[col].mean(), df_active[col].std()
-                if sigma == 0:
-                    sigma = 1.0
-                df_active[col+'_ZScore'] = ((df_active[col] - mu) / sigma).round(6)
-                scaling_log[col+'_ZScore'] = {'method': 'zscore', 'mean': float(mu), 'std': float(sigma)}
-
-        # ═══════════════════ STEP 8 — RECOMBINE ═════════════════════
-        if 'Label_Compliant' in df_sundays.columns:
-            df_sundays['Label_Compliant'] = 0
-        df_final = pd.concat([df_active, df_sundays]).sort_index().reset_index(drop=True)
-
-        total_rows    = len(df_final)
-        active_cnt    = len(df_active)
-        compliant_cnt = int(df_final.get('Label_Compliant', pd.Series()).sum()) if 'Label_Compliant' in df_final.columns else 0
-
-        # ═══════════════════ STEP 9 — STYLED EXCEL OUTPUT ════════════
-        THIN     = Side(style='thin',  color='B0BEC5')
-        BDR      = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
-        CC       = Alignment(horizontal='center', vertical='center')
-        LC       = Alignment(horizontal='left',   vertical='center')
-        RC       = Alignment(horizontal='right',  vertical='center')
-        H_FILL   = PatternFill('solid', fgColor='1E3A8A')
-        H_FONT   = Font(bold=True, color='FFFFFF', size=10, name='Calibri')
-        ALT_FILL = PatternFill('solid', fgColor='EFF6FF')
-        SUN_FILL = PatternFill('solid', fgColor='F1F5F9')
-        SUN_FONT = Font(italic=True, color='94A3B8', size=10, name='Calibri')
-        ZERO_FNT = Font(italic=True, color='CBD5E1', size=10, name='Calibri')
-        NORM_F   = Font(size=10, name='Calibri')
-        G_FILL   = PatternFill('solid', fgColor='D1FAE5')
-        R_FILL   = PatternFill('solid', fgColor='FEE2E2')
-        G_FONT   = Font(bold=True, color='065F46', size=10, name='Calibri')
-        R_FONT   = Font(bold=True, color='991B1B', size=10, name='Calibri')
-        SUM_FILL = PatternFill('solid', fgColor='DBEAFE')
-        SUM_FONT = Font(bold=True, size=10, color='1E3A8A', name='Calibri')
-        ORG_FILL = PatternFill('solid', fgColor='FEF3C7')
-        PUR_FILL = PatternFill('solid', fgColor='EDE9FE')
-
-        wb = openpyxl.Workbook()
-
-        # ── Sheet 1: Cleaned Data ──
-        ws = wb.active
-        ws.title = 'Clean Data'
-        headers  = list(df_final.columns)
-        n_cols   = len(headers)
-
-        # Group headers row for STP format
-        if data_type == 'stp_excel' and 'pH_In' in headers and 'pH_Out' in headers:
-            in_s  = headers.index('pH_In')  + 1
-            in_e  = headers.index('TSS_In') + 1
-            out_s = headers.index('pH_Out') + 1
-            out_e = headers.index('TSS_Out')+ 1
-            ws.merge_cells(start_row=1, start_column=in_s,  end_row=1, end_column=in_e)
-            ws.merge_cells(start_row=1, start_column=out_s, end_row=1, end_column=out_e)
-            c_in = ws.cell(1, in_s,  value='INLET Parameters')
-            c_in.fill = PatternFill('solid', fgColor='1D4ED8')
-            c_in.font = Font(bold=True, color='FFFFFF', size=10, name='Calibri')
-            c_in.alignment = CC
-            c_out = ws.cell(1, out_s, value='OUTLET Parameters')
-            c_out.fill = PatternFill('solid', fgColor='065F46')
-            c_out.font = Font(bold=True, color='FFFFFF', size=10, name='Calibri')
-            c_out.alignment = CC
-            ws.row_dimensions[1].height = 18
-            hdr_row = 2
-        else:
-            hdr_row = 1
-
-        # Detect scaled columns
-        minmax_cols = [c for c in headers if c.endswith('_MinMax')]
-        zscore_cols = [c for c in headers if c.endswith('_ZScore')]
-
-        # Column header row
-        for ci, h in enumerate(headers, 1):
-            cell = ws.cell(hdr_row, ci, value=h)
-            if h in minmax_cols:
-                cell.fill = ORG_FILL
-                cell.font = Font(bold=True, color='92400E', size=10, name='Calibri')
-            elif h in zscore_cols:
-                cell.fill = PUR_FILL
-                cell.font = Font(bold=True, color='4C1D95', size=10, name='Calibri')
-            else:
-                cell.fill = H_FILL
-                cell.font = H_FONT
-            cell.alignment = CC
-            cell.border = BDR
-        ws.row_dimensions[hdr_row].height = 22
-
-        active_stripe = 0
-        for ri, (_, row) in enumerate(df_final.iterrows()):
-            r       = ri + hdr_row + 1
-            sunday  = bool(is_off.iloc[ri]) if ri < len(is_off) else False
-            row_fill = SUN_FILL if sunday else (ALT_FILL if active_stripe % 2 == 0 else PatternFill())
-            if not sunday:
-                active_stripe += 1
-
-            for ci, col in enumerate(headers, 1):
-                v    = row[col]
-                cell = ws.cell(r, ci, value=v)
-                cell.border = BDR
-
-                if sunday:
-                    cell.fill = SUN_FILL
-                    if isinstance(v, (int, float)):
-                        cell.font = ZERO_FNT; cell.alignment = CC
-                    else:
-                        cell.font = SUN_FONT; cell.alignment = CC
-                elif col == 'Label_Compliant':
-                    cell.fill  = G_FILL if v == 1 else R_FILL
-                    cell.font  = G_FONT if v == 1 else R_FONT
-                    cell.value = '✓ Yes' if v == 1 else '✗ No'
-                    cell.alignment = CC
-                elif col == 'Date':
-                    cell.font = NORM_F; cell.alignment = CC
-                    if hasattr(v, 'strftime'):
-                        cell.value = v.strftime('%d-%b-%Y')
-                elif col in minmax_cols:
-                    cell.fill = ORG_FILL; cell.font = NORM_F; cell.alignment = RC
-                    cell.number_format = '0.000000'
-                elif col in zscore_cols:
-                    cell.fill = PUR_FILL; cell.font = NORM_F; cell.alignment = RC
-                    cell.number_format = '0.000000'
-                elif isinstance(v, float):
-                    cell.fill = row_fill; cell.font = NORM_F; cell.alignment = RC
-                    cell.number_format = '0.00'
-                elif isinstance(v, int):
-                    cell.fill = row_fill; cell.font = NORM_F; cell.alignment = RC
-                else:
-                    cell.fill = row_fill; cell.font = NORM_F; cell.alignment = LC
-
-            ws.row_dimensions[r].height = 17
-
-        ws.freeze_panes = f'A{hdr_row + 1}'
-        for ci, col in enumerate(headers, 1):
-            ws.column_dimensions[get_column_letter(ci)].width = 14
-
-        # Summary row
-        sum_r = total_rows + hdr_row + 2
-        ws.merge_cells(f'A{sum_r}:{get_column_letter(n_cols)}{sum_r}')
-        extra_info = ''
-        if scaling_log:
-            methods = sorted(set(v['method'] for v in scaling_log.values()))
-            extra_info = f'  |  Scaling: {", ".join(methods).upper()} applied ({len(scaling_log)} columns)'
-        if cat_encoding_log:
-            extra_info += f'  |  Categorical encoding: {encode_cats} ({len(cat_encoding_log)} columns)'
-        ws[f'A{sum_r}'].value = (
-            f'TOTAL: {active_cnt} active rows  |  {sunday_cnt} Sunday/Holiday rows  |  '
-            f'{compliant_cnt} MPCB Compliant  |  {sum(outlier_counts.values()) if outlier_counts else 0} outliers clamped'
-            f'{extra_info}'
-        )
-        ws[f'A{sum_r}'].font      = SUM_FONT
-        ws[f'A{sum_r}'].alignment = LC
-        for ci in range(1, n_cols + 1):
-            ws.cell(sum_r, ci).border = BDR
-            ws.cell(sum_r, ci).fill   = SUM_FILL
-
-        # ── Sheet 2: Preprocessing Report ──────────────────────────────
-        ws2 = wb.create_sheet('Preprocessing Report')
-        ws2.column_dimensions['A'].width = 35
-        ws2.column_dimensions['B'].width = 50
-
-        report_rows = [
-            ('PREPROCESSING SUMMARY', ''),
-            ('File',        orig_name),
-            ('Dataset type', {'stp_excel':'STP Test Report (PMC)',
-                               'custom_excel':'Custom Excel',
-                               'scada_csv':'SCADA/Generic CSV'}.get(data_type, 'Generic')),
-            ('Total rows',  total_rows),
-            ('Active rows', active_cnt),
-            ('Sunday/Holiday rows', sunday_cnt),
-            ('Duplicates removed', dupes_removed),
-            ('Missing values filled', missing_before - missing_after),
-            ('Outlier columns clamped', len(outlier_counts)),
-            ('',''),
-            ('COLUMN MAPPING APPLIED', ''),
-        ]
-        if user_col_map:
-            for raw_c, mapped in user_col_map.items():
-                report_rows.append((f'  {raw_c}', f'→ {mapped}'))
-        else:
-            report_rows.append(('  (auto-detected STP format)', ''))
-
-        report_rows += [('',''), ('DATE NORMALIZATION', '')]
-        date_cols_found = [c for c in df_final.columns if 'date' in c.lower() or c == 'Date']
-        if date_cols_found:
-            for dc in date_cols_found:
-                report_rows.append((f'  {dc}', 'Parsed & normalized to DD-MMM-YYYY'))
-        else:
-            report_rows.append(('  No date column detected', ''))
-
-        if cat_encoding_log:
-            report_rows += [('',''), ('CATEGORICAL ENCODING', '')]
-            for col, info in cat_encoding_log.items():
-                if info['method'] == 'label':
-                    report_rows.append((f'  {col}', f'Label encoded ({len(info["map"])} categories)'))
-                else:
-                    report_rows.append((f'  {col}', f'One-hot: {", ".join(info["new_cols"])}'))
-
-        if scaling_log:
-            report_rows += [('',''), ('SCALING APPLIED', '')]
-            for col, info in scaling_log.items():
-                if info['method'] == 'minmax':
-                    report_rows.append((f'  {col}', f'Min-Max  [min={info["min"]:.4f}, max={info["max"]:.4f}]'))
-                else:
-                    report_rows.append((f'  {col}', f'Z-Score  [mean={info["mean"]:.4f}, std={info["std"]:.4f}]'))
-
-        if outlier_counts:
-            report_rows += [('',''), ('OUTLIERS CLAMPED (IQR×1.5)', '')]
-            for col, n in outlier_counts.items():
-                report_rows.append((f'  {col}', f'{n} values clamped'))
-
-        TIT_FONT = Font(bold=True, color='1E3A8A', size=11, name='Calibri')
-        for ri2, (k, v2) in enumerate(report_rows, 1):
-            ca = ws2.cell(ri2, 1, value=k)
-            cb = ws2.cell(ri2, 2, value=str(v2) if v2 != '' else '')
-            if k.isupper() and k != '':
-                ca.font = TIT_FONT
-                ca.fill = PatternFill('solid', fgColor='EFF6FF')
-            else:
-                ca.font = NORM_F
-            cb.font = NORM_F
-            ws2.row_dimensions[ri2].height = 16
-
-        buf = io.BytesIO()
-        wb.save(buf); buf.seek(0)
-        encoded = base64.b64encode(buf.read()).decode()
-
-        return jsonify({
-            'success':        True,
-            'rows':           total_rows,
-            'active':         active_cnt,
-            'sundays':        sunday_cnt,
-            'compliant':      compliant_cnt,
-            'columns':        headers,
-            'outliers':       outlier_counts,
-            'missing_filled': missing_before - missing_after,
-            'dupes_removed':  dupes_removed,
-            'data_type':      data_type,
-            'encoding_log':   cat_encoding_log,
-            'scaling_log':    {k: v['method'] for k,v in scaling_log.items()},
-            'file':           encoded,
-            'filename':       out_fname
-        })
-
-    except Exception as e:
-        logger.error(f'preprocess_file error: {e}', exc_info=True)
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
+# ── EXPORT MATLAB SCRIPT ──────────────────────────────────────────────────────
 @app.route('/api/export-mat-script', methods=['POST','OPTIONS'])
 def export_mat():
     if request.method == 'OPTIONS': return '',200
@@ -1988,39 +1652,24 @@ def export_mat():
     sel_in  = d.get('selectedInputs',[])
     sel_out = d.get('selectedOutputs',[])
 
-    # Build unique 3-char hex hash from input param values
     hash_input = ''.join(f'{k}={v}' for k, v in sorted(params.items()))
     hex_hash   = hashlib.md5(hash_input.encode()).hexdigest()[:3]
-
-    # Safe plant type (alphanumeric only)
-    safe_pt = ''.join(c for c in pt if c.isalnum())
-
-    # Timestamp — MATLAB safe: letters, numbers, underscores only
-    now = datetime.now()
-    date_part = now.strftime('%Y%m%d')
-    time_part = now.strftime('%H%M%S')
-
-    # Final filename: wwtp_asp_20250224_143012_0c4
-    base_name = f'wwtp_{safe_pt}_{date_part}_{time_part}_{hex_hash}'
-    fname     = f'{base_name}.m'
+    safe_pt    = ''.join(c for c in pt if c.isalnum())
+    now        = datetime.now()
+    base_name  = f'wwtp_{safe_pt}_{now.strftime("%Y%m%d")}_{now.strftime("%H%M%S")}_{hex_hash}'
+    fname      = f'{base_name}.m'
 
     code = gen_matlab(pt, params, nn_cfg, pred, sel_in, sel_out, mat_basename=base_name)
     return Response(code, mimetype='text/plain',
                     headers={'Content-Disposition': f'attachment; filename={fname}'})
 
-if __name__ == '__main__':
-    # ── LOCAL DEVELOPMENT ONLY ─────────────────────────────────────
-    # For production, run via:
-    # gunicorn --workers=4 --threads=2 --timeout=120 --log-level=info app:app
-    # ──────────────────────────────────────────────────────────────
-    port = int(os.environ.get('PORT', 5000))
-    debug_mode = os.environ.get('FLASK_ENV', 'production') != 'production'
 
+if __name__ == '__main__':
+    port       = int(os.environ.get('PORT', 5000))
+    debug_mode = os.environ.get('FLASK_ENV', 'production') != 'production'
     print('=' * 55)
-    print('  WWTP Neural Prediction System — v3.0')
+    print('  WWTP Neural Prediction System — v4.0')
     print(f'  Server : http://localhost:{port}')
     print(f'  Status : http://localhost:{port}/api/status')
-    print(f'  Mode   : {"Development" if debug_mode else "Production"}')
     print('=' * 55)
-
     app.run(debug=debug_mode, port=port, host='0.0.0.0')
