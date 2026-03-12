@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>WWTP Simulation & Neural Prediction System</title>
     <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
-    <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -62,8 +61,8 @@
         }
 
         @keyframes spin {
-            from { display: inline-block; transform: rotate(0deg); }
-            to   { display: inline-block; transform: rotate(360deg); }
+            from { transform: rotate(0deg); }
+            to   { transform: rotate(360deg); }
         }
 
         .card {
@@ -604,7 +603,7 @@
             </div>
             
             <!-- Added Upload Zone Section -->
-            <div class="upload-zone" id="uploadZone" onclick="document.getElementById('fileInput').click()">
+            <div class="upload-zone" id="uploadZone">
                 <div class="upload-icon">⬆️</div>
                 <h3>Drop Excel file here or click to upload</h3>
                 <p style="color: #6b7280; margin-top: 10px;">
@@ -812,6 +811,18 @@
 
     <script>
         // Plant parameters database
+        // ── Module-level state (declared first to avoid hoisting issues) ──────
+        let currentParams     = [];
+        let _rawFile          = null;
+        let _preprocessedB64  = null;
+        let _preprocessedName = null;
+        let _uploadedRows     = [];
+        let _uploadedHeaders  = [];
+        let _pred             = null;
+        let _metricCharts     = {};
+        let _renderedHorizon  = 7;
+
+        // Plant parameters database
         const plantParameters = {
             asp: [
                 { id: 'cod_inf', label: 'COD Influent', unit: 'mg/L', default: 450, min: 100, max: 1000 },
@@ -860,7 +871,6 @@
             bardenpho: ['TP Effluent', 'PO4-P Effluent', 'COD Effluent', 'Nitrogen Removal', 'Phosphorus Removal']
         };
 
-        let currentParams = [];
 
         function updateParameters() {
             const plantType = document.getElementById('plantType').value;
@@ -1106,10 +1116,6 @@
             return h.trim().toLowerCase().replace(/\s*\(.*?\)/g, '').replace(/[-\/]/g, ' ').replace(/\s+/g, ' ').trim();
         }
 
-        // Holds the parsed full dataset waiting to be sent for preprocessing
-        let _uploadedRows    = [];
-        let _uploadedHeaders = [];
-
         function applyAvgToParams(avgClean) {
             let matched = 0;
             Object.entries(avgClean).forEach(([pid, val]) => {
@@ -1122,7 +1128,7 @@
         function showUploadProcessing(fileName, fileSize, nRows, nMatched, nParams) {
             const zone = document.getElementById('uploadZone');
             zone.innerHTML = `
-                <div class="upload-icon" style="animation:spin 1s linear infinite;">⚙️</div>
+                <div class="upload-icon" style="display:inline-block;animation:spin 1s linear infinite;">⚙️</div>
                 <h3 style="color:#1e3a8a;">Preprocessing <em>${fileName}</em>…</h3>
                 <p style="color:#6b7280;margin-top:6px;">
                     ${(fileSize/1024).toFixed(1)} KB &nbsp;·&nbsp;
@@ -1132,7 +1138,6 @@
                 <p style="margin-top:8px;font-size:0.78rem;color:#6b7280;">
                     Applying: Mean Imputation → IQR Outlier Clamping → Min-Max Normalisation → Z-Score Standardisation
                 </p>
-                <input type="file" id="fileInput" style="display:none;" accept=".xlsx,.xls,.csv" onchange="handleFileUpload(event)">
             `;
         }
 
@@ -1150,7 +1155,6 @@
                     ✔ Downloaded: <code style="background:#f0fdf4;padding:1px 6px;border-radius:4px;">${dlFname}</code>
                 </p>
                 <p style="margin-top:4px;font-size:0.75rem;color:#6b7280;">Input fields filled with clean averages · Drop another file to reprocess</p>
-                <input type="file" id="fileInput" style="display:none;" accept=".xlsx,.xls,.csv" onchange="handleFileUpload(event)">
             `;
         }
 
@@ -1162,14 +1166,8 @@
                 <p style="color:#6b7280;margin-top:6px;">${(fileSize/1024).toFixed(1)} KB &nbsp;·&nbsp; ${nRows} rows</p>
                 <p style="margin-top:6px;font-size:0.82rem;font-weight:600;color:#991b1b;">Preprocessing failed: ${errMsg}</p>
                 <p style="margin-top:4px;font-size:0.75rem;color:#6b7280;">Drop the file again to retry</p>
-                <input type="file" id="fileInput" style="display:none;" accept=".xlsx,.xls,.csv" onchange="handleFileUpload(event)">
             `;
         }
-
-        // ── State ────────────────────────────────────────────────────────────────
-        let _rawFile          = null;   // the original File object dropped by user
-        let _preprocessedB64  = null;   // base64 of processed xlsx — ready to download
-        let _preprocessedName = null;   // filename for the download
 
         // ── Step 1: File dropped / selected — preprocess immediately ────────────
         async function parseAndStore(file) {
@@ -1239,8 +1237,8 @@
                 };
 
                 const details = [];
-                if (data.missing_filled) details.push(`${data.missing_filled} missing values filled`);
-                if (data.dupes_removed)  details.push(`${data.dupes_removed} duplicates removed`);
+                if (data.missing_imputed)      details.push(`${data.missing_imputed} missing values filled`);
+                if (data.duplicates_removed)   details.push(`${data.duplicates_removed} duplicates removed`);
 
                 const label = typeLabels[data.data_type] || '📊 Preprocessed Data';
                 showUploadDone(file.name, file.size, data.rows, label, currentParams.length, data.filename);
@@ -1280,13 +1278,12 @@
         function showUploadSpinner(fileName, fileSize) {
             const zone = document.getElementById('uploadZone');
             zone.innerHTML = `
-                <div class="upload-icon" style="animation:spin 1s linear infinite;">⚙️</div>
+                <div class="upload-icon" style="display:inline-block;animation:spin 1s linear infinite;">⚙️</div>
                 <h3 style="color:#1e3a8a;">Preprocessing <em>${fileName}</em>…</h3>
                 <p style="color:#6b7280;margin-top:6px;">${(fileSize/1024).toFixed(1)} KB — Detecting format &amp; applying pipeline…</p>
                 <p style="margin-top:8px;font-size:0.78rem;color:#6b7280;">
                     Mean Imputation → IQR Outlier Clamping → Min-Max Normalisation → Z-Score Standardisation
                 </p>
-                <input type="file" id="fileInput" style="display:none;" accept=".xlsx,.xls,.csv" onchange="handleFileUpload(event)">
             `;
         }
 
@@ -1294,8 +1291,6 @@
         //  BACKEND INTEGRATION — do not change layout above
         // ═══════════════════════════════════════════════════════════
         const API = 'https://wwtp-app.onrender.com/api';
-        let _pred = null;   // last prediction response
-        let _metricCharts = {};  // Chart.js instances
 
         // ── collect selected input ids ──────────────────────────
         function getSelectedInputIds() {
@@ -1532,6 +1527,7 @@
             // ── build per-day data ──────────────────────────────────
             const startDate = new Date(document.getElementById('startDate').value);
             const horizon   = parseInt(document.getElementById('horizon').value) || 7;
+            _renderedHorizon = horizon;
 
             // generate day-by-day predicted values (same drift as backend)
             const days = [];
@@ -1638,8 +1634,7 @@
         }
 
         function switchDay(idx) {
-            const horizon = parseInt(document.getElementById('horizon').value) || 7;
-            for (let i = 0; i < horizon; i++) {
+            for (let i = 0; i < _renderedHorizon; i++) {
                 const tab   = document.getElementById('_tab_'+i);
                 const panel = document.getElementById('_dayPanel_'+i);
                 if (!tab || !panel) continue;
@@ -1678,7 +1673,10 @@
             const STATUS_COLOR_MAP = {
                 COMPLIANT: 'rgba(16,185,129,0.85)', PASS: 'rgba(16,185,129,0.85)',
                 MARGINAL:  'rgba(245,158,11,0.85)',
-                FAIL:      'rgba(239,68,68,0.85)',   EXCEEDANCE:'rgba(239,68,68,0.85)'
+                FAIL:      'rgba(239,68,68,0.85)',   EXCEEDANCE:'rgba(239,68,68,0.85)',
+                'GOOD FIT':       'rgba(16,185,129,0.85)',
+                'UNDERFIT MODEL': 'rgba(245,158,11,0.85)',
+                'OVERFIT MODEL':  'rgba(239,68,68,0.85)',
             };
             const barColors = results.map(r => STATUS_COLOR_MAP[r.status] || 'rgba(59,130,246,0.85)');
 
@@ -1780,8 +1778,14 @@
                 const mat_v  = parseFloat(r.standard);
                 const error  = pred_v - mat_v;
                 const errPct = mat_v !== 0 ? ((error / mat_v) * 100).toFixed(1) : '—';
-                const colorMap = { COMPLIANT:'#065f46', PASS:'#065f46', MARGINAL:'#92400e', FAIL:'#991b1b', EXCEEDANCE:'#991b1b' };
-                const bgMap    = { COMPLIANT:'#d1fae5', PASS:'#d1fae5', MARGINAL:'#fef3c7', FAIL:'#fee2e2', EXCEEDANCE:'#fee2e2' };
+                const colorMap = {
+                    COMPLIANT:'#065f46', PASS:'#065f46', MARGINAL:'#92400e', FAIL:'#991b1b', EXCEEDANCE:'#991b1b',
+                    'GOOD FIT':'#065f46', 'UNDERFIT MODEL':'#92400e', 'OVERFIT MODEL':'#991b1b',
+                };
+                const bgMap    = {
+                    COMPLIANT:'#d1fae5', PASS:'#d1fae5', MARGINAL:'#fef3c7', FAIL:'#fee2e2', EXCEEDANCE:'#fee2e2',
+                    'GOOD FIT':'#d1fae5', 'UNDERFIT MODEL':'#fef3c7', 'OVERFIT MODEL':'#fee2e2',
+                };
                 const barW = Math.min(100, Math.abs((pred_v / (mat_v || 1)) * 100));
                 const barColor = barColors[i];
                 const card = document.createElement('div');
@@ -2015,6 +2019,11 @@
             uploadZone.classList.remove('dragover');
             const files = e.dataTransfer.files;
             if (files.length) handleFileUpload({ target: { files } });
+        });
+        uploadZone.addEventListener('click', (e) => {
+            if (e.target.tagName !== 'INPUT') {
+                document.getElementById('fileInput').click();
+            }
         });
     </script>
 </body>
