@@ -3,12 +3,17 @@ WWTP Neural Prediction System — Backend v3.0 (Production)
 Deploy : gunicorn --workers=4 --threads=2 --timeout=120 app:app
 Open   : https://your-app.onrender.com
 
-Requirements: pip install flask openpyxl gunicorn
+Requirements: pip install flask openpyxl pandas gunicorn
 """
 
 from flask import Flask, request, jsonify, send_from_directory, Response
 import json, math, random, os, io, csv, base64, logging
 from datetime import datetime, timedelta
+import pandas as pd
+import openpyxl
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+import hashlib
 
 # ── LOGGING (Production) ───────────────────────────────────────────────────────
 logging.basicConfig(
@@ -205,7 +210,6 @@ def gen_matlab(pt, params, nn_cfg, predicted, selected_input_ids, selected_outpu
 
     # Fallback if called without a pre-computed base name
     if mat_basename is None:
-        import hashlib
         hash_input = ''.join(f'{k}={v}' for k, v in sorted(params.items()))
         hex_hash   = hashlib.md5(hash_input.encode()).hexdigest()[:3]
         safe_pt    = ''.join(c for c in pt if c.isalnum())
@@ -466,12 +470,8 @@ def predict():
 def export_excel():
     if request.method == 'OPTIONS': return '',200
     try:
-        import openpyxl
-        from openpyxl.styles import (PatternFill, Font, Alignment, Border, Side,
-                                      GradientFill)
         from openpyxl.chart import BarChart, LineChart, Reference
         from openpyxl.chart.series import SeriesLabel
-        from openpyxl.utils import get_column_letter
         HAS_OPENPYXL = True
     except ImportError:
         HAS_OPENPYXL = False
@@ -1168,11 +1168,7 @@ def export_excel():
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
-    import hashlib as _hl1
-    _hx1 = _hl1.md5(("".join(f"{k}={v}" for k,v in sorted(params.items()))).encode()).hexdigest()[:3]
-    _sp1 = "".join(c for c in pt if c.isalnum())
-    _nw1 = datetime.now()
-    fname = f'wwtp_{_sp1}_{_nw1.strftime("%Y%m%d")}_{_nw1.strftime("%H%M%S")}_{_hx1}.xlsx'
+    fname = f'wwtp_{pt}_{datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}.xlsx'
     return Response(buf.read(),
                     mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                     headers={'Content-Disposition': f'attachment; filename={fname}'})
@@ -1188,7 +1184,6 @@ def parse_stp_excel(file_bytes):
              ph_out, bod_out, cod_out, tss_out, chlorine, source_month, label_compliant
     MPCB compliance: pH_Out 6.5–9.0, BOD_Out ≤ 30, COD_Out ≤ 150, TSS_Out ≤ 100
     """
-    import openpyxl
 
     def safe_float(v):
         try:    return float(v)
@@ -1338,191 +1333,145 @@ def parse_scada_csv(file_bytes):
 # ─────────────────────────────────────────────────────────
 @app.route('/api/preprocess', methods=['POST','OPTIONS'])
 def preprocess_file():
-    if request.method == 'OPTIONS':
-        return '', 200
+
+    if request.method == "OPTIONS":
+        return '',200
+
     try:
-        import openpyxl as _oxl, hashlib as _hlp, pandas as _pd
-        from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
-        from openpyxl.utils import get_column_letter
 
         if 'file' not in request.files:
-            return jsonify({'success': False, 'error': 'No file uploaded'}), 400
+            return jsonify({
+                "success":False,
+                "error":"No file uploaded"
+            }),400
 
-        file          = request.files['file']
-        orig_name     = file.filename
-        fname_lower   = orig_name.lower()
-        file_bytes    = file.read()
+        file = request.files['file']
+        filename = file.filename.lower()
 
-        # ── Output filename: wwtp_{name}_{YYYYMMDD}_{HHMMSS}_{hash}.xlsx ──────
-        _safe = ''.join(c if c.isalnum() or c in ('_','-') else '_' for c in orig_name.rsplit('.',1)[0])
-        _hxp  = _hlp.md5(file_bytes).hexdigest()[:3]
-        _nwp  = datetime.now()
-        out_fname = f'wwtp_{_safe}_{_nwp.strftime("%Y%m%d")}_{_nwp.strftime("%H%M%S")}_{_hxp}.xlsx'
 
-        if not (fname_lower.endswith('.xlsx') or fname_lower.endswith('.xls') or fname_lower.endswith('.csv')):
-            return jsonify({'success': False, 'error': 'Unsupported file format'}), 400
+        # ───── READ FILE ─────
+        if filename.endswith(".csv"):
+            df = pd.read_csv(file)
 
-        # ── Parse PMC STP Excel (multi-sheet, metadata rows, Sunday strings) ──
-        records = parse_stp_excel(file_bytes) if (fname_lower.endswith('.xlsx') or fname_lower.endswith('.xls')) else []
+        elif filename.endswith(".xlsx") or filename.endswith(".xls"):
+            df = pd.read_excel(file)
 
-        if records:
-            # ════════════════════════════════════════════════════════════════
-            # APPROVED FORMAT — styled xlsx identical to WWTP_Preprocessed_Clean
-            # ════════════════════════════════════════════════════════════════
-            THIN     = Side(style='thin',   color='B0BEC5')
-            BDR      = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
-            CC       = Alignment(horizontal='center', vertical='center')
-            LC       = Alignment(horizontal='left',   vertical='center')
-            RC       = Alignment(horizontal='right',  vertical='center')
-            H_FILL   = PatternFill('solid', fgColor='1E3A8A')
-            H_FONT   = Font(bold=True,  color='FFFFFF', size=10, name='Arial')
-            ALT_FILL = PatternFill('solid', fgColor='F0F4FF')
-            SUN_FILL = PatternFill('solid', fgColor='F1F5F9')
-            SUN_FONT = Font(italic=True, color='94A3B8', size=10, name='Arial')
-            ZERO_FNT = Font(italic=True, color='CBD5E1', size=10, name='Arial')
-            G_FILL   = PatternFill('solid', fgColor='D1FAE5')
-            R_FILL   = PatternFill('solid', fgColor='FEE2E2')
-            G_FONT   = Font(bold=True,  color='065F46', size=10, name='Arial')
-            R_FONT   = Font(bold=True,  color='991B1B', size=10, name='Arial')
-            NORM_F   = Font(size=10, name='Arial')
-
-            wb = _oxl.Workbook()
-            ws = wb.active
-            ws.title = 'WWTP Clean Data'
-
-            # Row 1 — INLET / OUTLET group headers
-            ws.merge_cells('E1:H1')
-            ws['E1'].value     = 'INLET Parameters'
-            ws['E1'].fill      = PatternFill('solid', fgColor='1D4ED8')
-            ws['E1'].font      = Font(bold=True, color='FFFFFF', size=10, name='Arial')
-            ws['E1'].alignment = CC
-            ws.merge_cells('I1:M1')
-            ws['I1'].value     = 'OUTLET Parameters'
-            ws['I1'].fill      = PatternFill('solid', fgColor='065F46')
-            ws['I1'].font      = Font(bold=True, color='FFFFFF', size=10, name='Arial')
-            ws['I1'].alignment = CC
-            ws.row_dimensions[1].height = 18
-
-            # Row 2 — clean column headers (Source_Month removed)
-            HEADERS = ['Sr No.', 'Date', 'Plant', 'Flow (MLD)',
-                       'Inlet pH', 'Inlet BOD (mg/L)', 'Inlet COD (mg/L)', 'Inlet TSS (mg/L)',
-                       'Outlet pH', 'Outlet BOD (mg/L)', 'Outlet COD (mg/L)', 'Outlet TSS (mg/L)',
-                       'Chlorine (FC)', 'MPCB Compliant']
-            for ci, h in enumerate(HEADERS, 1):
-                cell = ws.cell(2, ci, value=h)
-                cell.fill = H_FILL; cell.font = H_FONT
-                cell.alignment = CC; cell.border = BDR
-            ws.row_dimensions[2].height = 22
-
-            # Data rows
-            COL_KEYS    = ['day','date','plant','flow_mld',
-                           'ph_in','bod_in','cod_in','tss_in',
-                           'ph_out','bod_out','cod_out','tss_out',
-                           'chlorine','label_compliant']
-            active_cnt  = 0
-            sunday_cnt  = 0
-
-            for ri, rec in enumerate(records):
-                is_sunday = (rec.get('ph_in', 0) == 0 and rec.get('cod_in', 0) == 0)
-                r = ri + 3
-                row_fill = SUN_FILL if is_sunday else (ALT_FILL if active_cnt % 2 == 0 else PatternFill())
-                if is_sunday: sunday_cnt += 1
-                else:         active_cnt += 1
-
-                for ci, key in enumerate(COL_KEYS, 1):
-                    v    = rec.get(key)
-                    cell = ws.cell(r, ci, value=v)
-                    cell.border = BDR
-
-                    if is_sunday:
-                        cell.fill = SUN_FILL
-                        if   ci == 1: cell.font = SUN_FONT;  cell.alignment = CC
-                        elif ci == 2:
-                            cell.font = Font(italic=True, color='64748B', size=10, name='Arial')
-                            cell.alignment = CC
-                            if hasattr(v, 'strftime'): cell.value = v.strftime('%d-%b-%Y')
-                        elif ci == 3:
-                            cell.font = Font(italic=True, color='64748B', size=10, name='Arial')
-                            cell.alignment = LC
-                        else: cell.font = ZERO_FNT; cell.alignment = CC
-                    else:
-                        cell.fill = row_fill
-                        if ci == 14:
-                            cell.fill      = G_FILL if v == 1 else R_FILL
-                            cell.font      = G_FONT if v == 1 else R_FONT
-                            cell.alignment = CC
-                            cell.value     = '\u2713 Yes' if v == 1 else '\u2717 No'
-                        elif ci == 2:
-                            cell.font = NORM_F; cell.alignment = CC
-                            if hasattr(v, 'strftime'):
-                                cell.value = v.strftime('%d-%b-%Y')
-                                cell.number_format = 'DD-MMM-YYYY'
-                        elif ci == 3: cell.font = NORM_F; cell.alignment = LC
-                        elif ci == 1: cell.font = NORM_F; cell.alignment = CC
-                        else:         cell.font = NORM_F; cell.alignment = RC
-
-                ws.row_dimensions[r].height = 17
-
-            # Freeze panes & column widths
-            ws.freeze_panes = 'A3'
-            for ci, w in enumerate([7,13,12,10, 9,16,16,16, 10,17,17,17, 13,14], 1):
-                ws.column_dimensions[get_column_letter(ci)].width = w
-
-            # Summary row
-            sum_r = len(records) + 4
-            ws.merge_cells(f'A{sum_r}:D{sum_r}')
-            ws[f'A{sum_r}'].value     = f'TOTAL: {active_cnt} active days  |  {sunday_cnt} Sunday/Holiday rows (shown as 0)'
-            ws[f'A{sum_r}'].font      = Font(bold=True, size=10, color='1E3A8A', name='Arial')
-            ws[f'A{sum_r}'].alignment = LC
-            sum_bg = PatternFill('solid', fgColor='EFF6FF')
-            for ci in range(1, 15):
-                ws.cell(sum_r, ci).border = BDR
-                ws.cell(sum_r, ci).fill   = sum_bg
-
-            buf = io.BytesIO()
-            wb.save(buf); buf.seek(0)
-            encoded = base64.b64encode(buf.read()).decode()
-            return jsonify({'success': True, 'rows': len(records), 'active': active_cnt,
-                            'sundays': sunday_cnt, 'columns': HEADERS,
-                            'file': encoded, 'filename': out_fname})
-
-        # ════════════════════════════════════════════════════════════════════
-        # GENERIC / CSV FALLBACK — basic clean + normalise
-        # ════════════════════════════════════════════════════════════════════
-        if fname_lower.endswith('.csv'):
-            df = _pd.read_csv(io.BytesIO(file_bytes))
         else:
-            raw = _pd.read_excel(io.BytesIO(file_bytes), header=None)
-            hdr = None
-            for i, row in raw.iterrows():
-                tc = [str(c).strip().lower() for c in row if c is not None and str(c).strip() not in ('','nan')]
-                if len(tc) >= 3 and any(k in ' '.join(tc) for k in ('ph','cod','bod','tss','date')):
-                    hdr = i; break
-            df = _pd.read_excel(io.BytesIO(file_bytes), header=hdr or 0)
-            if len(df) > 0 and df.iloc[0].astype(str).str.strip().str.startswith('<').sum() >= 2:
-                df = df.iloc[1:].reset_index(drop=True)
+            return jsonify({
+                "success":False,
+                "error":"Unsupported file format"
+            }),400
 
-        df = df.dropna(how='all').dropna(axis=1, how='all')
-        for col in df.columns:
-            df[col] = df[col].apply(lambda x: None if isinstance(x,str) and
-                                    x.strip().lower() in ('sunday','holiday','off','','nan','none') else x)
-        df = df[df.apply(lambda r: r.astype(str).str.contains(r'\d').any(), axis=1)].reset_index(drop=True)
-        if len(df) == 0:
-            return jsonify({'success': False, 'error': 'No data rows found in the uploaded file'}), 400
-        df = df.ffill()
-        for col in df.select_dtypes(include=['number']).columns:
-            m = df[col].mean()
-            if not _pd.isna(m): df[col] = df[col].fillna(m)
-        for col in df.select_dtypes(include=['number']).columns:
-            mn, mx = df[col].min(), df[col].max()
-            if mx != mn: df[col] = (df[col] - mn) / (mx - mn)
-        out = io.BytesIO(); df.to_excel(out, index=False); out.seek(0)
-        encoded = base64.b64encode(out.read()).decode()
-        return jsonify({'success': True, 'rows': len(df), 'columns': list(df.columns),
-                        'file': encoded, 'filename': out_fname})
+
+        # ─────────────────────────────────
+        # CLEAN DATASET
+        # ─────────────────────────────────
+
+        # remove empty rows
+        df = df.dropna(how="all")
+
+        # remove empty columns
+        df = df.dropna(axis=1, how="all")
+
+        # remove report text rows (keep rows containing numbers)
+        df = df[df.apply(lambda r: r.astype(str).str.contains(r'\d').any(), axis=1)]
+
+        # reset index
+        df = df.reset_index(drop=True)
+
+        # clean column names
+        df.columns = [
+            str(c)
+            .strip()
+            .lower()
+            .replace(" ","_")
+            .replace("-","_")
+            for c in df.columns
+        ]
+
+        # fill missing values
+        df = df.fillna(method="ffill")
+
+
+        # ─────────────────────────────────
+        # NORMALIZE NUMERIC DATA
+        # ─────────────────────────────────
+        numeric_cols = df.select_dtypes(include=["int64","float64"]).columns
+
+        for col in numeric_cols:
+
+            min_val = df[col].min()
+            max_val = df[col].max()
+
+            if max_val != min_val:
+                df[col] = (df[col] - min_val) / (max_val - min_val)
+
+
+        # ─────────────────────────────────
+        # SAVE CLEAN FILE
+        # ─────────────────────────────────
+        output = io.BytesIO()
+
+        df.to_excel(output, index=False)
+
+        output.seek(0)
+
+        encoded_file = base64.b64encode(output.read()).decode()
+
+
+        return jsonify({
+            "success":True,
+            "rows":len(df),
+            "columns":list(df.columns),
+            "file":encoded_file,
+            "filename":"cleaned_dataset.xlsx"
+        })
+
 
     except Exception as e:
+
         logger.error(str(e))
+
+        return jsonify({
+            "success":False,
+            "error":str(e)
+        }),500
+
+        # ── BASIC PREPROCESSING ──
+        df.columns = [c.strip().lower() for c in df.columns]
+
+        # Remove empty rows
+        df = df.dropna(how='all')
+
+        # Fill missing values with column mean
+        df = df.fillna(df.mean(numeric_only=True))
+
+        # Normalize numeric columns
+        numeric_cols = df.select_dtypes(include=['float64','int64']).columns
+        for col in numeric_cols:
+            min_val = df[col].min()
+            max_val = df[col].max()
+            if max_val != min_val:
+                df[col] = (df[col] - min_val) / (max_val - min_val)
+
+        df = df.reset_index(drop=True)
+
+        # Save processed file
+        output = io.BytesIO()
+        df.to_excel(output, index=False)
+        output.seek(0)
+
+        encoded = base64.b64encode(output.read()).decode()
+
+        return jsonify({
+            'success': True,
+            'rows': len(df),
+            'columns': list(df.columns),
+            'file': encoded,
+            'filename': 'preprocessed_dataset.xlsx'
+        })
+
+    except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
     # ── Branch: PMC STP Excel ─────────────────────────────────
@@ -1792,12 +1741,9 @@ def preprocess_file():
 
         buf  = io.BytesIO()
         wb.save(buf); buf.seek(0)
-        import hashlib as _hl2
-        _b2  = file_name.rsplit('.',1)[0] if file_name else 'stp_data'
-        _sb2 = ''.join(c if c.isalnum() or c in ('_','-') else '_' for c in _b2)
-        _hx2 = _hl2.md5(_sb2.encode()).hexdigest()[:3]
-        _nw2 = datetime.now()
-        fname = f'wwtp_{_sb2}_{_nw2.strftime("%Y%m%d")}_{_nw2.strftime("%H%M%S")}_{_hx2}.xlsx'
+        ts    = datetime.now().strftime('%Y%m%d_%H%M%S')
+        base  = file_name.rsplit('.', 1)[0] if file_name else 'stp_data'
+        fname = f'{base}_preprocessed_{ts}.xlsx'
         return Response(
             buf.read(),
             mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -1983,12 +1929,9 @@ def preprocess_file():
 
     buf  = io.BytesIO()
     wb.save(buf); buf.seek(0)
-    import hashlib as _hl3
-    _b3  = file_name.rsplit('.',1)[0] if file_name else pt
-    _sb3 = ''.join(c if c.isalnum() or c in ('_','-') else '_' for c in _b3)
-    _hx3 = _hl3.md5(_sb3.encode()).hexdigest()[:3]
-    _nw3 = datetime.now()
-    fname = f'wwtp_{_sb3}_{_nw3.strftime("%Y%m%d")}_{_nw3.strftime("%H%M%S")}_{_hx3}.xlsx'
+    ts   = datetime.now().strftime('%Y%m%d_%H%M%S')
+    base = file_name.rsplit('.',1)[0] if file_name else pt
+    fname = f'{base}_preprocessed_{ts}.xlsx'
     return Response(
         buf.read(),
         mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -2019,7 +1962,6 @@ def export_mat():
     sel_out = d.get('selectedOutputs',[])
 
     # Build unique 3-char hex hash from input param values
-    import hashlib
     hash_input = ''.join(f'{k}={v}' for k, v in sorted(params.items()))
     hex_hash   = hashlib.md5(hash_input.encode()).hexdigest()[:3]
 
