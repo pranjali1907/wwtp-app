@@ -1472,41 +1472,153 @@ def preprocess_file():
                             'sundays': sunday_cnt, 'columns': HEADERS,
                             'file': encoded, 'filename': out_fname})
 
-        # ── Generic / CSV fallback ──────────────────────────────────────────
+        # ══════════════════════════════════════════════════════════════════
+        # GENERIC / CSV — works with ANY xlsx or csv file
+        # Steps: smart header detect → drop empties → impute → normalise → styled xlsx
+        # ══════════════════════════════════════════════════════════════════
+
+        # ── 1. Read into DataFrame ────────────────────────────────────────
         if fname_lower.endswith('.csv'):
-            df = pd.read_csv(io.BytesIO(file_bytes))
+            # Try common encodings
+            for enc in ('utf-8', 'utf-8-sig', 'latin-1', 'cp1252'):
+                try:
+                    df = pd.read_csv(io.BytesIO(file_bytes), encoding=enc)
+                    break
+                except Exception:
+                    continue
+            else:
+                return jsonify({'success': False, 'error': 'Could not decode CSV file'}), 400
         else:
+            # Smart header detection: find first row with ≥3 non-empty text cells
             raw = pd.read_excel(io.BytesIO(file_bytes), header=None)
-            hdr = None
+            hdr = 0
             for i, row in raw.iterrows():
-                tc = [str(c).strip().lower() for c in row
-                      if c is not None and str(c).strip() not in ('','nan')]
-                if len(tc) >= 3 and any(k in ' '.join(tc) for k in ('ph','cod','bod','tss','date')):
+                tc = [str(c).strip() for c in row if c is not None and str(c).strip() not in ('', 'nan')]
+                if len(tc) >= 3:
                     hdr = i; break
-            df = pd.read_excel(io.BytesIO(file_bytes), header=hdr or 0)
+            df = pd.read_excel(io.BytesIO(file_bytes), header=hdr)
+            # Drop MPCB-style threshold rows (rows where ≥2 cells start with '<')
             if len(df) > 0 and df.iloc[0].astype(str).str.strip().str.startswith('<').sum() >= 2:
                 df = df.iloc[1:].reset_index(drop=True)
 
-        df = df.dropna(how='all').dropna(axis=1, how='all')
-        for col in df.columns:
-            df[col] = df[col].apply(lambda x: None if isinstance(x, str) and
-                x.strip().lower() in ('sunday','holiday','off','','nan','none') else x)
-        df = df[df.apply(lambda r: r.astype(str).str.contains(r'\d').any(), axis=1)].reset_index(drop=True)
+        # ── 2. Clean column names ─────────────────────────────────────────
+        df.columns = [str(c).strip() for c in df.columns]
+        # Drop fully empty rows/cols
+        df = df.dropna(how='all').dropna(axis=1, how='all').reset_index(drop=True)
         if len(df) == 0:
             return jsonify({'success': False, 'error': 'No data rows found in the uploaded file'}), 400
 
-        df = df.ffill()
-        for col in df.select_dtypes(include=['number']).columns:
-            m = df[col].mean()
-            if not pd.isna(m): df[col] = df[col].fillna(m)
-        for col in df.select_dtypes(include=['number']).columns:
-            mn, mx = df[col].min(), df[col].max()
-            if mx != mn: df[col] = (df[col] - mn) / (mx - mn)
+        # ── 3. Replace day-off strings with NaN ──────────────────────────
+        OFF_STRINGS = {'sunday', 'holiday', 'off', '', 'nan', 'none', 'n/a', '-', '--'}
+        for col in df.columns:
+            df[col] = df[col].apply(
+                lambda x: None if isinstance(x, str) and x.strip().lower() in OFF_STRINGS else x
+            )
 
-        out = io.BytesIO(); df.to_excel(out, index=False); out.seek(0)
-        encoded = base64.b64encode(out.read()).decode()
-        return jsonify({'success': True, 'rows': len(df), 'columns': list(df.columns),
-                        'file': encoded, 'filename': out_fname})
+        # Keep only rows that have at least one digit somewhere
+        df = df[df.apply(lambda r: r.astype(str).str.contains(r'\d').any(), axis=1)].reset_index(drop=True)
+        if len(df) == 0:
+            return jsonify({'success': False, 'error': 'No numeric data rows found'}), 400
+
+        total_rows = len(df)
+
+        # ── 4. Missing value imputation (column mean) ─────────────────────
+        num_cols = df.select_dtypes(include=['number']).columns.tolist()
+        df = df.ffill().bfill()
+        for col in num_cols:
+            m = df[col].mean()
+            if not pd.isna(m):
+                df[col] = df[col].fillna(m)
+
+        # ── 5. IQR outlier clamping ───────────────────────────────────────
+        outlier_counts = {}
+        for col in num_cols:
+            q1, q3 = df[col].quantile(0.25), df[col].quantile(0.75)
+            iqr = q3 - q1
+            lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+            n_out = ((df[col] < lo) | (df[col] > hi)).sum()
+            if n_out: outlier_counts[col] = int(n_out)
+            df[col] = df[col].clip(lower=lo, upper=hi)
+
+        # ── 6. Min-Max normalisation (0–1) ────────────────────────────────
+        for col in num_cols:
+            mn, mx = df[col].min(), df[col].max()
+            if mx != mn:
+                df[col] = (df[col] - mn) / (mx - mn)
+
+        # ── 7. Build styled Excel output ──────────────────────────────────
+        THIN     = Side(style='thin',   color='B0BEC5')
+        BDR      = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+        CC       = Alignment(horizontal='center', vertical='center')
+        LC       = Alignment(horizontal='left',   vertical='center')
+        RC       = Alignment(horizontal='right',  vertical='center')
+        H_FILL   = PatternFill('solid', fgColor='1E3A8A')
+        H_FONT   = Font(bold=True, color='FFFFFF', size=10, name='Arial')
+        ALT_FILL = PatternFill('solid', fgColor='F0F4FF')
+        NORM_F   = Font(size=10, name='Arial')
+        SUM_FILL = PatternFill('solid', fgColor='EFF6FF')
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = 'Preprocessed Data'
+
+        headers = list(df.columns)
+
+        # Header row
+        for ci, h in enumerate(headers, 1):
+            cell = ws.cell(1, ci, value=h)
+            cell.fill = H_FILL; cell.font = H_FONT
+            cell.alignment = CC; cell.border = BDR
+        ws.row_dimensions[1].height = 22
+
+        # Data rows
+        for ri, (_, row) in enumerate(df.iterrows()):
+            r        = ri + 2
+            row_fill = ALT_FILL if ri % 2 == 0 else PatternFill()
+            for ci, col in enumerate(headers, 1):
+                v    = row[col]
+                cell = ws.cell(r, ci, value=v)
+                cell.border = BDR
+                cell.fill   = row_fill
+                cell.font   = NORM_F
+                # Numbers right-aligned, text left-aligned
+                if isinstance(v, (int, float)):
+                    cell.alignment = RC
+                    if isinstance(v, float):
+                        cell.number_format = '0.0000'
+                else:
+                    cell.alignment = LC
+            ws.row_dimensions[r].height = 16
+
+        # Auto column widths
+        for ci, col in enumerate(headers, 1):
+            max_len = max(len(str(col)), df[col].astype(str).str.len().max() if len(df) > 0 else 0)
+            ws.column_dimensions[get_column_letter(ci)].width = min(max(max_len + 2, 10), 30)
+
+        ws.freeze_panes = 'A2'
+
+        # Summary row
+        sum_r = len(df) + 3
+        ws.merge_cells(f'A{sum_r}:{get_column_letter(len(headers))}{sum_r}')
+        outlier_str = f'  |  Outliers clamped: {sum(outlier_counts.values())} cells' if outlier_counts else ''
+        ws[f'A{sum_r}'].value     = (f'TOTAL: {total_rows} rows  |  {len(num_cols)} numeric columns normalised (Min-Max 0–1){outlier_str}')
+        ws[f'A{sum_r}'].font      = Font(bold=True, size=10, color='1E3A8A', name='Arial')
+        ws[f'A{sum_r}'].alignment = LC
+        for ci in range(1, len(headers) + 1):
+            ws.cell(sum_r, ci).border = BDR
+            ws.cell(sum_r, ci).fill   = SUM_FILL
+
+        buf = io.BytesIO()
+        wb.save(buf); buf.seek(0)
+        encoded = base64.b64encode(buf.read()).decode()
+        return jsonify({
+            'success':  True,
+            'rows':     total_rows,
+            'columns':  headers,
+            'outliers': outlier_counts,
+            'file':     encoded,
+            'filename': out_fname
+        })
 
     except Exception as e:
         logger.error(str(e))
