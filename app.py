@@ -1329,6 +1329,154 @@ def parse_scada_csv(file_bytes):
     return records, col_map
 
 
+# ── COLUMN SCANNER — returns raw headers + auto-detected types ────────────────
+@app.route('/api/scan-columns', methods=['POST','OPTIONS'])
+def scan_columns():
+    """
+    Step 1 of custom-column flow.
+    Reads just the header row + first 50 data rows and returns:
+      - raw column names
+      - inferred type for each col: 'numeric' | 'datetime' | 'categorical' | 'text'
+      - up to 5 sample values per column
+      - auto-suggested mapping to WWTP parameter IDs (best-guess fuzzy match)
+    """
+    if request.method == 'OPTIONS':
+        return '', 200
+    try:
+        if 'file' not in request.files:
+            return jsonify({'success': False, 'error': 'No file uploaded'}), 400
+
+        file        = request.files['file']
+        fname_lower = file.filename.lower()
+        file_bytes  = file.read()
+
+        if fname_lower.endswith('.csv'):
+            df_raw = None
+            for enc in ('utf-8', 'utf-8-sig', 'latin-1', 'cp1252'):
+                try:
+                    df_raw = pd.read_csv(io.BytesIO(file_bytes), encoding=enc, nrows=50)
+                    break
+                except Exception:
+                    continue
+            if df_raw is None:
+                return jsonify({'success': False, 'error': 'Could not decode CSV'}), 400
+        else:
+            # Smart header detection for Excel
+            raw_all = pd.read_excel(io.BytesIO(file_bytes), header=None, nrows=60)
+            hdr = 0
+            for i, row in raw_all.iterrows():
+                tc = [str(c).strip() for c in row if c is not None and str(c).strip() not in ('', 'nan')]
+                if len(tc) >= 3:
+                    hdr = i
+                    break
+            df_raw = pd.read_excel(io.BytesIO(file_bytes), header=hdr, nrows=50)
+            # Drop MPCB threshold row
+            if len(df_raw) > 0 and df_raw.iloc[0].astype(str).str.strip().str.startswith('<').sum() >= 2:
+                df_raw = df_raw.iloc[1:].reset_index(drop=True)
+
+        df_raw.columns = [str(c).strip() for c in df_raw.columns]
+        df_raw = df_raw.dropna(how='all', axis=1)
+
+        # ── Fuzzy alias table: normalised label → param id ──
+        WWTP_ALIASES = {
+            'cod':                   'cod_inf', 'cod inf':             'cod_inf',
+            'cod influent':          'cod_inf', 'chemical oxygen demand': 'cod_inf',
+            'bod':                   'bod_inf', 'bod inf':             'bod_inf',
+            'bod influent':          'bod_inf', 'biological oxygen demand':'bod_inf',
+            'tss':                   'tss_inf', 'tss inf':             'tss_inf',
+            'tss influent':          'tss_inf', 'total suspended solids':  'tss_inf',
+            'nh3':                   'nh3_inf', 'nh3 n':               'nh3_inf',
+            'ammonia':               'nh3_inf', 'nh3 n influent':       'nh3_inf',
+            'flow':                  'flow',    'flow rate':            'flow',
+            'flowrate':              'flow',    'q':                    'flow',
+            'do':                    'do',      'dissolved oxygen':     'do',
+            'mlss':                  'mlss',    'mixed liquor':         'mlss',
+            'mixed liquor suspended solids': 'mlss',
+            'sludge age':            'sludge_age', 'srt':               'sludge_age',
+            'solids retention time': 'sludge_age',
+            'tmp':                   'tmp',     'transmembrane pressure': 'tmp',
+            'flux':                  'flux',    'membrane flux':        'flux',
+            'cycle time':            'cycle_time', 'cycle':             'cycle_time',
+            'fill time':             'fill_time',  'fill':              'fill_time',
+            'react time':            'react_time', 'reaction time':     'react_time',
+            'tn':                    'tn_inf',  'total nitrogen':       'tn_inf',
+            'total n':               'tn_inf',
+            'internal recycle':      'internal_recycle', 'ir':          'internal_recycle',
+            'sludge recycle':        'sludge_recycle',   'sr':          'sludge_recycle',
+            'tp':                    'tp_inf',  'total phosphorus':     'tp_inf',
+            'phosphorus':            'tp_inf',
+            'stages':                'stages',  'anoxic stages':        'stages',
+            'anaerobic hrt':         'anaerobic_hrt', 'hrt':            'anaerobic_hrt',
+            'hydraulic retention time': 'anaerobic_hrt',
+            'ph':                    'ph_in',   'ph in':                'ph_in',
+            'ph out':                'ph_out',  'ph outlet':            'ph_out',
+            'bod out':               'bod_out', 'bod outlet':           'bod_out',
+            'cod out':               'cod_out', 'cod outlet':           'cod_out',
+            'tss out':               'tss_out', 'tss outlet':           'tss_out',
+            'chlorine':              'chlorine','cl':                   'chlorine',
+            'date':                  'date',    'day':                  'day',
+            'plant':                 'plant',
+        }
+
+        def norm_col(h):
+            import re
+            h2 = h.lower().strip()
+            h2 = re.sub(r'\s*\(.*?\)', '', h2)   # strip units in parens
+            h2 = re.sub(r'[-_/]', ' ', h2)
+            h2 = re.sub(r'\s+', ' ', h2).strip()
+            return h2
+
+        def infer_type(series):
+            """Return 'datetime'|'numeric'|'categorical'|'text'."""
+            non_null = series.dropna()
+            if len(non_null) == 0:
+                return 'text'
+            # Try datetime
+            try:
+                parsed = pd.to_datetime(non_null.astype(str), infer_datetime_format=True, errors='coerce')
+                if parsed.notna().sum() / len(non_null) >= 0.7:
+                    return 'datetime'
+            except Exception:
+                pass
+            # Try numeric
+            num = pd.to_numeric(non_null, errors='coerce')
+            if num.notna().sum() / len(non_null) >= 0.7:
+                return 'numeric'
+            # Categorical vs free text
+            unique_ratio = non_null.nunique() / len(non_null)
+            return 'categorical' if unique_ratio <= 0.5 else 'text'
+
+        columns_info = []
+        for col in df_raw.columns:
+            col_type    = infer_type(df_raw[col])
+            samples     = [str(v) for v in df_raw[col].dropna().head(5).tolist()]
+            norm        = norm_col(col)
+            suggested   = WWTP_ALIASES.get(norm, None)
+            # fallback: partial match
+            if not suggested:
+                for alias, pid in WWTP_ALIASES.items():
+                    if alias in norm or norm in alias:
+                        suggested = pid
+                        break
+            columns_info.append({
+                'raw_name':  col,
+                'type':      col_type,
+                'samples':   samples,
+                'suggested': suggested,   # may be None
+            })
+
+        return jsonify({
+            'success':     True,
+            'n_rows':      len(df_raw),
+            'n_cols':      len(columns_info),
+            'columns':     columns_info,
+        })
+
+    except Exception as e:
+        logger.error(f'scan_columns error: {e}', exc_info=True)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 # ── PREPROCESSING ROUTE ───────────────────────────────────────────────────────
 # ── DATA PREPROCESS API ─────────────────────────────────────────────
 # ─────────────────────────────────────────────────────────
@@ -1342,290 +1490,490 @@ def preprocess_file():
         if 'file' not in request.files:
             return jsonify({'success': False, 'error': 'No file uploaded'}), 400
 
+        import re as _re
+
         file        = request.files['file']
         orig_name   = file.filename
         fname_lower = orig_name.lower()
         file_bytes  = file.read()
 
-        # Filename: wwtp_{plantType}_{YYYYMMDD}_{HHMMSS}_{hash}.xlsx
-        # Same pattern as MATLAB (.m) and Excel export (.xlsx)
-        pt_raw    = request.form.get('plantType', '') or orig_name.rsplit('.',1)[0]
-        _safe_pt  = ''.join(c for c in pt_raw if c.isalnum()).lower()
-        _hxp      = hashlib.md5(file_bytes).hexdigest()[:3]
-        _nwp      = datetime.now()
+        if not (fname_lower.endswith('.xlsx') or fname_lower.endswith('.xls') or fname_lower.endswith('.csv')):
+            return jsonify({'success': False, 'error': 'Unsupported file format. Please upload .xlsx, .xls or .csv'}), 400
+
+        # Output filename
+        pt_raw   = request.form.get('plantType', '') or orig_name.rsplit('.',1)[0]
+        _safe_pt = ''.join(c for c in pt_raw if c.isalnum()).lower()
+        _hxp     = hashlib.md5(file_bytes).hexdigest()[:3]
+        _nwp     = datetime.now()
         out_fname = f'wwtp_{_safe_pt}_{_nwp.strftime("%Y%m%d")}_{_nwp.strftime("%H%M%S")}_{_hxp}.xlsx'
 
-        if not (fname_lower.endswith('.xlsx') or fname_lower.endswith('.xls') or fname_lower.endswith('.csv')):
-            return jsonify({'success': False, 'error': 'Unsupported file format'}), 400
+        # User-supplied column mapping from frontend column-mapper UI
+        # JSON: { "RawColName": "param_id_or_role" }
+        # roles: 'date'|'day'|'plant'|'ignore'  OR a WWTP param id like 'cod_inf'
+        col_mapping_raw = request.form.get('colMapping', '{}')
+        try:
+            user_col_map = json.loads(col_mapping_raw)
+        except Exception:
+            user_col_map = {}
 
-        # Try PMC STP multi-sheet Excel first
-        records = parse_stp_excel(file_bytes) if (fname_lower.endswith('.xlsx') or fname_lower.endswith('.xls')) else []
+        scale_method = request.form.get('scaleMethod', 'none')   # none|minmax|zscore|both
+        encode_cats  = request.form.get('encodeCats',  'label')   # label|onehot|none
 
-        if records:
-            # ── Approved styled output ──────────────────────────────────────
-            THIN     = Side(style='thin',   color='B0BEC5')
-            BDR      = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
-            CC       = Alignment(horizontal='center', vertical='center')
-            LC       = Alignment(horizontal='left',   vertical='center')
-            RC       = Alignment(horizontal='right',  vertical='center')
-            H_FILL   = PatternFill('solid', fgColor='1E3A8A')
-            H_FONT   = Font(bold=True,  color='FFFFFF', size=10, name='Arial')
-            ALT_FILL = PatternFill('solid', fgColor='F0F4FF')
-            SUN_FILL = PatternFill('solid', fgColor='F1F5F9')
-            SUN_FONT = Font(italic=True, color='94A3B8', size=10, name='Arial')
-            ZERO_FNT = Font(italic=True, color='CBD5E1', size=10, name='Arial')
-            G_FILL   = PatternFill('solid', fgColor='D1FAE5')
-            R_FILL   = PatternFill('solid', fgColor='FEE2E2')
-            G_FONT   = Font(bold=True,  color='065F46', size=10, name='Arial')
-            R_FONT   = Font(bold=True,  color='991B1B', size=10, name='Arial')
-            NORM_F   = Font(size=10, name='Arial')
+        # ═══════════════════ STEP 1 — PARSE ════════════════════════
+        data_type   = 'generic'
+        stp_records = []
 
-            wb = openpyxl.Workbook()
-            ws = wb.active
-            ws.title = 'WWTP Clean Data'
+        if fname_lower.endswith('.xlsx') or fname_lower.endswith('.xls'):
+            stp_records = parse_stp_excel(file_bytes)
 
-            # Row 1: group headers
-            ws.merge_cells('E1:H1')
-            ws['E1'].value = 'INLET Parameters'
-            ws['E1'].fill  = PatternFill('solid', fgColor='1D4ED8')
-            ws['E1'].font  = Font(bold=True, color='FFFFFF', size=10, name='Arial')
-            ws['E1'].alignment = CC
-            ws.merge_cells('I1:M1')
-            ws['I1'].value = 'OUTLET Parameters'
-            ws['I1'].fill  = PatternFill('solid', fgColor='065F46')
-            ws['I1'].font  = Font(bold=True, color='FFFFFF', size=10, name='Arial')
-            ws['I1'].alignment = CC
-            ws.row_dimensions[1].height = 18
+        if stp_records and not user_col_map:
+            data_type = 'stp_excel'
+            df = pd.DataFrame(stp_records)
+            df = df.rename(columns={
+                'day':'Day','date':'Date','plant':'Plant','flow_mld':'Flow_MLD',
+                'ph_in':'pH_In','bod_in':'BOD_In','cod_in':'COD_In','tss_in':'TSS_In',
+                'ph_out':'pH_Out','bod_out':'BOD_Out','cod_out':'COD_Out','tss_out':'TSS_Out',
+                'chlorine':'Chlorine','source_month':'Source_Month','label_compliant':'Label_Compliant'
+            })
+            col_order = ['Day','Date','Plant','Flow_MLD','pH_In','BOD_In','COD_In','TSS_In',
+                         'pH_Out','BOD_Out','COD_Out','TSS_Out','Chlorine','Source_Month','Label_Compliant']
+            df = df[[c for c in col_order if c in df.columns]]
 
-            # Row 2: clean column headers
-            HEADERS = ['Sr No.', 'Date', 'Plant', 'Flow (MLD)',
-                       'Inlet pH', 'Inlet BOD (mg/L)', 'Inlet COD (mg/L)', 'Inlet TSS (mg/L)',
-                       'Outlet pH', 'Outlet BOD (mg/L)', 'Outlet COD (mg/L)', 'Outlet TSS (mg/L)',
-                       'Chlorine (FC)', 'MPCB Compliant']
-            for ci, h in enumerate(HEADERS, 1):
-                cell = ws.cell(2, ci, value=h)
-                cell.fill = H_FILL; cell.font = H_FONT
-                cell.alignment = CC; cell.border = BDR
-            ws.row_dimensions[2].height = 22
-
-            COL_KEYS   = ['day','date','plant','flow_mld',
-                          'ph_in','bod_in','cod_in','tss_in',
-                          'ph_out','bod_out','cod_out','tss_out',
-                          'chlorine','label_compliant']
-            active_cnt = sunday_cnt = 0
-
-            for ri, rec in enumerate(records):
-                is_sunday = (rec.get('ph_in', 0) == 0 and rec.get('cod_in', 0) == 0)
-                r         = ri + 3
-                row_fill  = SUN_FILL if is_sunday else (ALT_FILL if active_cnt % 2 == 0 else PatternFill())
-                if is_sunday: sunday_cnt += 1
-                else:         active_cnt += 1
-
-                for ci, key in enumerate(COL_KEYS, 1):
-                    v    = rec.get(key)
-                    cell = ws.cell(r, ci, value=v)
-                    cell.border = BDR
-                    if is_sunday:
-                        cell.fill = SUN_FILL
-                        if   ci == 1: cell.font = SUN_FONT;  cell.alignment = CC
-                        elif ci == 2:
-                            cell.font = Font(italic=True, color='64748B', size=10, name='Arial')
-                            cell.alignment = CC
-                            if hasattr(v, 'strftime'): cell.value = v.strftime('%d-%b-%Y')
-                        elif ci == 3:
-                            cell.font = Font(italic=True, color='64748B', size=10, name='Arial')
-                            cell.alignment = LC
-                        else: cell.font = ZERO_FNT; cell.alignment = CC
-                    else:
-                        cell.fill = row_fill
-                        if ci == 14:
-                            cell.fill  = G_FILL if v == 1 else R_FILL
-                            cell.font  = G_FONT if v == 1 else R_FONT
-                            cell.alignment = CC
-                            cell.value = '✓ Yes' if v == 1 else '✗ No'
-                        elif ci == 2:
-                            cell.font = NORM_F; cell.alignment = CC
-                            if hasattr(v, 'strftime'):
-                                cell.value = v.strftime('%d-%b-%Y')
-                                cell.number_format = 'DD-MMM-YYYY'
-                        elif ci == 3: cell.font = NORM_F; cell.alignment = LC
-                        elif ci == 1: cell.font = NORM_F; cell.alignment = CC
-                        else:         cell.font = NORM_F; cell.alignment = RC
-                ws.row_dimensions[r].height = 17
-
-            ws.freeze_panes = 'A3'
-            for ci, w in enumerate([7,13,12,10,9,16,16,16,10,17,17,17,13,14], 1):
-                ws.column_dimensions[get_column_letter(ci)].width = w
-
-            sum_r = len(records) + 4
-            ws.merge_cells(f'A{sum_r}:D{sum_r}')
-            ws[f'A{sum_r}'].value     = f'TOTAL: {active_cnt} active days  |  {sunday_cnt} Sunday/Holiday rows (shown as 0)'
-            ws[f'A{sum_r}'].font      = Font(bold=True, size=10, color='1E3A8A', name='Arial')
-            ws[f'A{sum_r}'].alignment = LC
-            sum_bg = PatternFill('solid', fgColor='EFF6FF')
-            for ci in range(1, 15):
-                ws.cell(sum_r, ci).border = BDR
-                ws.cell(sum_r, ci).fill   = sum_bg
-
-            buf = io.BytesIO()
-            wb.save(buf); buf.seek(0)
-            encoded = base64.b64encode(buf.read()).decode()
-            return jsonify({'success': True, 'rows': len(records), 'active': active_cnt,
-                            'sundays': sunday_cnt, 'columns': HEADERS,
-                            'data_type': 'stp_excel',
-                            'file': encoded, 'filename': out_fname})
-
-        # ══════════════════════════════════════════════════════════════════
-        # GENERIC / CSV — works with ANY xlsx or csv file
-        # Steps: smart header detect → drop empties → impute → normalise → styled xlsx
-        # ══════════════════════════════════════════════════════════════════
-
-        # ── 1. Read into DataFrame ────────────────────────────────────────
-        if fname_lower.endswith('.csv'):
-            # Try common encodings
-            for enc in ('utf-8', 'utf-8-sig', 'latin-1', 'cp1252'):
-                try:
-                    df = pd.read_csv(io.BytesIO(file_bytes), encoding=enc)
-                    break
-                except Exception:
-                    continue
-            else:
-                return jsonify({'success': False, 'error': 'Could not decode CSV file'}), 400
         else:
-            # Smart header detection: find first row with ≥3 non-empty text cells
-            raw = pd.read_excel(io.BytesIO(file_bytes), header=None)
-            hdr = 0
-            for i, row in raw.iterrows():
-                tc = [str(c).strip() for c in row if c is not None and str(c).strip() not in ('', 'nan')]
-                if len(tc) >= 3:
-                    hdr = i; break
-            df = pd.read_excel(io.BytesIO(file_bytes), header=hdr)
-            # Drop MPCB-style threshold rows (rows where ≥2 cells start with '<')
-            if len(df) > 0 and df.iloc[0].astype(str).str.strip().str.startswith('<').sum() >= 2:
-                df = df.iloc[1:].reset_index(drop=True)
+            # ── Generic / custom-column path ──
+            data_type = 'custom_excel' if (fname_lower.endswith('.xlsx') or fname_lower.endswith('.xls')) else 'scada_csv'
+            if fname_lower.endswith('.csv'):
+                df = None
+                for enc in ('utf-8', 'utf-8-sig', 'latin-1', 'cp1252'):
+                    try:
+                        df = pd.read_csv(io.BytesIO(file_bytes), encoding=enc)
+                        break
+                    except Exception:
+                        continue
+                if df is None:
+                    return jsonify({'success': False, 'error': 'Could not decode CSV — try saving as UTF-8'}), 400
+            else:
+                raw = pd.read_excel(io.BytesIO(file_bytes), header=None)
+                hdr = 0
+                for i, row in raw.iterrows():
+                    tc = [str(c).strip() for c in row if c is not None and str(c).strip() not in ('', 'nan')]
+                    if len(tc) >= 3:
+                        hdr = i; break
+                df = pd.read_excel(io.BytesIO(file_bytes), header=hdr)
+                if len(df) > 0 and df.iloc[0].astype(str).str.strip().str.startswith('<').sum() >= 2:
+                    df = df.iloc[1:].reset_index(drop=True)
 
-        # ── 2. Clean column names ─────────────────────────────────────────
-        df.columns = [str(c).strip() for c in df.columns]
-        # Drop fully empty rows/cols
+            df.columns = [str(c).strip() for c in df.columns]
+
+            # ── Apply user column mapping (rename + drop ignored) ──
+            if user_col_map:
+                rename_map = {}
+                drop_cols  = []
+                for raw_col, mapped_id in user_col_map.items():
+                    if raw_col not in df.columns:
+                        continue
+                    if mapped_id == 'ignore':
+                        drop_cols.append(raw_col)
+                    else:
+                        # Convert param_id → display name
+                        DISPLAY = {
+                            'cod_inf':'COD_In', 'bod_inf':'BOD_In', 'tss_inf':'TSS_In',
+                            'nh3_inf':'NH3_In', 'flow':'Flow_MLD', 'do':'DO',
+                            'mlss':'MLSS', 'sludge_age':'Sludge_Age', 'srt':'SRT',
+                            'tmp':'TMP', 'flux':'Flux', 'cycle_time':'Cycle_Time',
+                            'fill_time':'Fill_Time', 'react_time':'React_Time',
+                            'tn_inf':'TN_In', 'internal_recycle':'Internal_Recycle',
+                            'sludge_recycle':'Sludge_Recycle', 'tp_inf':'TP_In',
+                            'stages':'Stages', 'anaerobic_hrt':'Anaerobic_HRT',
+                            'ph_in':'pH_In', 'ph_out':'pH_Out',
+                            'bod_out':'BOD_Out', 'cod_out':'COD_Out','tss_out':'TSS_Out',
+                            'chlorine':'Chlorine', 'date':'Date','day':'Day','plant':'Plant',
+                        }
+                        rename_map[raw_col] = DISPLAY.get(mapped_id, mapped_id)
+                if drop_cols:
+                    df = df.drop(columns=drop_cols, errors='ignore')
+                if rename_map:
+                    df = df.rename(columns=rename_map)
+
+        # ═══════════════════ STEP 2 — CLEAN ════════════════════════
         df = df.dropna(how='all').dropna(axis=1, how='all').reset_index(drop=True)
         if len(df) == 0:
-            return jsonify({'success': False, 'error': 'No data rows found in the uploaded file'}), 400
+            return jsonify({'success': False, 'error': 'No data rows found in file'}), 400
 
-        # ── 3. Replace day-off strings with NaN ──────────────────────────
-        OFF_STRINGS = {'sunday', 'holiday', 'off', '', 'nan', 'none', 'n/a', '-', '--'}
+        SKIP_COLS = {'Day','Date','Plant','Source_Month','Label_Compliant'}
+        OFF = {'sunday','holiday','off','nan','none','n/a','-','--','null','na','nil'}
         for col in df.columns:
-            df[col] = df[col].apply(
-                lambda x: None if isinstance(x, str) and x.strip().lower() in OFF_STRINGS else x
-            )
+            if col in SKIP_COLS:
+                continue
+            df[col] = df[col].apply(lambda x: None if isinstance(x, str) and x.strip().lower() in OFF else x)
 
-        # Keep only rows that have at least one digit somewhere
-        df = df[df.apply(lambda r: r.astype(str).str.contains(r'\d').any(), axis=1)].reset_index(drop=True)
-        if len(df) == 0:
-            return jsonify({'success': False, 'error': 'No numeric data rows found'}), 400
+        # 2a — Date normalization: coerce any date-like column to ISO string
+        for col in df.columns:
+            if col in SKIP_COLS and col != 'Date':
+                continue
+            non_null = df[col].dropna()
+            if len(non_null) == 0:
+                continue
+            # Try to parse as datetime
+            try:
+                parsed = pd.to_datetime(non_null.astype(str), infer_datetime_format=True, errors='coerce')
+                hit_rate = parsed.notna().sum() / len(non_null)
+                if hit_rate >= 0.7:
+                    df[col] = pd.to_datetime(df[col].astype(str), infer_datetime_format=True, errors='coerce')
+                    if col not in ('Date',):
+                        # rename to canonical 'Date' if not already
+                        if 'Date' not in df.columns:
+                            df = df.rename(columns={col: 'Date'})
+            except Exception:
+                pass
 
-        total_rows = len(df)
+        # 2b — Coerce numerics
+        num_candidates = [c for c in df.columns if c not in ('Date','Plant','Source_Month')]
+        for col in num_candidates:
+            converted = pd.to_numeric(df[col], errors='coerce')
+            non_null  = df[col].notna().sum()
+            conv_ok   = converted.notna().sum()
+            if non_null > 0 and conv_ok / non_null >= 0.5:
+                df[col] = converted
 
-        # ── 4. Missing value imputation (column mean) ─────────────────────
         num_cols = df.select_dtypes(include=['number']).columns.tolist()
-        df = df.ffill().bfill()
-        for col in num_cols:
-            m = df[col].mean()
-            if not pd.isna(m):
-                df[col] = df[col].fillna(m)
 
-        # ── 5. IQR outlier clamping ───────────────────────────────────────
+        # 2c — Drop duplicates
+        before_dedup = len(df)
+        df = df.drop_duplicates().reset_index(drop=True)
+        dupes_removed = before_dedup - len(df)
+
+        # 2d — Identify off/Sunday rows
+        measure_cols = [c for c in num_cols if c not in ('Day','Flow_MLD','Label_Compliant','Chlorine')]
+        if measure_cols:
+            is_off = (df[measure_cols] == 0).all(axis=1)
+        else:
+            is_off = pd.Series([False] * len(df))
+
+        df_active  = df[~is_off].copy()
+        df_sundays = df[is_off].copy()
+        sunday_cnt = len(df_sundays)
+
+        # ═══════════════════ STEP 3 — CATEGORICAL ENCODING ══════════
+        cat_encoding_log = {}
+        cat_cols = [c for c in df_active.select_dtypes(include=['object','category']).columns
+                    if c not in ('Date','Source_Month')]
+
+        if encode_cats != 'none' and cat_cols:
+            for col in cat_cols:
+                unique_vals = df_active[col].dropna().unique().tolist()
+                # Only encode if reasonable cardinality
+                if len(unique_vals) > 50:
+                    continue
+                if encode_cats == 'label':
+                    val_map = {v: i for i, v in enumerate(sorted(str(x) for x in unique_vals))}
+                    df_active[col] = df_active[col].map(lambda x: val_map.get(str(x), -1) if pd.notna(x) else -1)
+                    cat_encoding_log[col] = {'method': 'label', 'map': val_map}
+                elif encode_cats == 'onehot':
+                    dummies = pd.get_dummies(df_active[col], prefix=col, dummy_na=False).astype(int)
+                    df_active = pd.concat([df_active.drop(columns=[col]), dummies], axis=1)
+                    cat_encoding_log[col] = {'method': 'onehot', 'new_cols': list(dummies.columns)}
+
+            # Refresh numeric cols list after encoding
+            num_cols = df_active.select_dtypes(include=['number']).columns.tolist()
+
+        # ═══════════════════ STEP 4 — IMPUTE ═══════════════════════
+        missing_before = int(df_active[num_cols].isna().sum().sum()) if num_cols else 0
+        df_active[num_cols] = df_active[num_cols].ffill().bfill()
+        for col in num_cols:
+            m = df_active[col].mean()
+            df_active[col] = df_active[col].fillna(m if not pd.isna(m) else 0)
+        missing_after = int(df_active[num_cols].isna().sum().sum()) if num_cols else 0
+
+        # ═══════════════════ STEP 5 — LABEL_COMPLIANT (STP only) ═══
+        def check_compliant(row):
+            try:
+                pH  = float(row.get('pH_Out',  0))
+                bod = float(row.get('BOD_Out', 0))
+                cod = float(row.get('COD_Out', 0))
+                tss = float(row.get('TSS_Out', 0))
+                return int(6.5 <= pH <= 9.0 and 0 < bod <= 30 and 0 < cod <= 150 and 0 < tss <= 100)
+            except Exception:
+                return 0
+
+        if all(c in df_active.columns for c in ('pH_Out','BOD_Out','COD_Out','TSS_Out')):
+            df_active['Label_Compliant'] = df_active.apply(check_compliant, axis=1)
+
+        # ═══════════════════ STEP 6 — OUTLIER CLAMPING (IQR×1.5) ════
+        skip_outlier = {'Day','Flow_MLD','Label_Compliant','Chlorine'}
         outlier_counts = {}
         for col in num_cols:
-            q1, q3 = df[col].quantile(0.25), df[col].quantile(0.75)
+            if col in skip_outlier or col not in df_active.columns:
+                continue
+            q1, q3 = df_active[col].quantile(0.25), df_active[col].quantile(0.75)
             iqr = q3 - q1
-            lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
-            n_out = ((df[col] < lo) | (df[col] > hi)).sum()
-            if n_out: outlier_counts[col] = int(n_out)
-            df[col] = df[col].clip(lower=lo, upper=hi)
+            if iqr == 0:
+                continue
+            lo, hi = q1 - 1.5*iqr, q3 + 1.5*iqr
+            n = int(((df_active[col] < lo) | (df_active[col] > hi)).sum())
+            if n:
+                outlier_counts[col] = n
+            df_active[col] = df_active[col].clip(lower=lo, upper=hi)
 
-        # ── 6. Min-Max normalisation (0–1) ────────────────────────────────
-        for col in num_cols:
-            mn, mx = df[col].min(), df[col].max()
-            if mx != mn:
-                df[col] = (df[col] - mn) / (mx - mn)
+        # ═══════════════════ STEP 7 — SCALING ═══════════════════════
+        scale_cols = [c for c in num_cols
+                      if c not in skip_outlier and c not in ('Label_Compliant','Day') and c in df_active.columns]
+        scaling_log = {}
 
-        # ── 7. Build styled Excel output ──────────────────────────────────
-        THIN     = Side(style='thin',   color='B0BEC5')
+        if scale_method in ('minmax', 'both') and scale_cols:
+            mm_cols = [c+'_MinMax' for c in scale_cols]
+            for col, mc in zip(scale_cols, mm_cols):
+                cmin, cmax = df_active[col].min(), df_active[col].max()
+                rng = cmax - cmin if cmax != cmin else 1.0
+                df_active[mc] = ((df_active[col] - cmin) / rng).round(6)
+                scaling_log[mc] = {'method': 'minmax', 'min': float(cmin), 'max': float(cmax)}
+
+        if scale_method in ('zscore', 'both') and scale_cols:
+            for col in scale_cols:
+                mu, sigma = df_active[col].mean(), df_active[col].std()
+                if sigma == 0:
+                    sigma = 1.0
+                df_active[col+'_ZScore'] = ((df_active[col] - mu) / sigma).round(6)
+                scaling_log[col+'_ZScore'] = {'method': 'zscore', 'mean': float(mu), 'std': float(sigma)}
+
+        # ═══════════════════ STEP 8 — RECOMBINE ═════════════════════
+        if 'Label_Compliant' in df_sundays.columns:
+            df_sundays['Label_Compliant'] = 0
+        df_final = pd.concat([df_active, df_sundays]).sort_index().reset_index(drop=True)
+
+        total_rows    = len(df_final)
+        active_cnt    = len(df_active)
+        compliant_cnt = int(df_final.get('Label_Compliant', pd.Series()).sum()) if 'Label_Compliant' in df_final.columns else 0
+
+        # ═══════════════════ STEP 9 — STYLED EXCEL OUTPUT ════════════
+        THIN     = Side(style='thin',  color='B0BEC5')
         BDR      = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
         CC       = Alignment(horizontal='center', vertical='center')
         LC       = Alignment(horizontal='left',   vertical='center')
         RC       = Alignment(horizontal='right',  vertical='center')
         H_FILL   = PatternFill('solid', fgColor='1E3A8A')
-        H_FONT   = Font(bold=True, color='FFFFFF', size=10, name='Arial')
-        ALT_FILL = PatternFill('solid', fgColor='F0F4FF')
-        NORM_F   = Font(size=10, name='Arial')
-        SUM_FILL = PatternFill('solid', fgColor='EFF6FF')
+        H_FONT   = Font(bold=True, color='FFFFFF', size=10, name='Calibri')
+        ALT_FILL = PatternFill('solid', fgColor='EFF6FF')
+        SUN_FILL = PatternFill('solid', fgColor='F1F5F9')
+        SUN_FONT = Font(italic=True, color='94A3B8', size=10, name='Calibri')
+        ZERO_FNT = Font(italic=True, color='CBD5E1', size=10, name='Calibri')
+        NORM_F   = Font(size=10, name='Calibri')
+        G_FILL   = PatternFill('solid', fgColor='D1FAE5')
+        R_FILL   = PatternFill('solid', fgColor='FEE2E2')
+        G_FONT   = Font(bold=True, color='065F46', size=10, name='Calibri')
+        R_FONT   = Font(bold=True, color='991B1B', size=10, name='Calibri')
+        SUM_FILL = PatternFill('solid', fgColor='DBEAFE')
+        SUM_FONT = Font(bold=True, size=10, color='1E3A8A', name='Calibri')
+        ORG_FILL = PatternFill('solid', fgColor='FEF3C7')
+        PUR_FILL = PatternFill('solid', fgColor='EDE9FE')
 
         wb = openpyxl.Workbook()
+
+        # ── Sheet 1: Cleaned Data ──
         ws = wb.active
-        ws.title = 'Preprocessed Data'
+        ws.title = 'Clean Data'
+        headers  = list(df_final.columns)
+        n_cols   = len(headers)
 
-        headers = list(df.columns)
+        # Group headers row for STP format
+        if data_type == 'stp_excel' and 'pH_In' in headers and 'pH_Out' in headers:
+            in_s  = headers.index('pH_In')  + 1
+            in_e  = headers.index('TSS_In') + 1
+            out_s = headers.index('pH_Out') + 1
+            out_e = headers.index('TSS_Out')+ 1
+            ws.merge_cells(start_row=1, start_column=in_s,  end_row=1, end_column=in_e)
+            ws.merge_cells(start_row=1, start_column=out_s, end_row=1, end_column=out_e)
+            c_in = ws.cell(1, in_s,  value='INLET Parameters')
+            c_in.fill = PatternFill('solid', fgColor='1D4ED8')
+            c_in.font = Font(bold=True, color='FFFFFF', size=10, name='Calibri')
+            c_in.alignment = CC
+            c_out = ws.cell(1, out_s, value='OUTLET Parameters')
+            c_out.fill = PatternFill('solid', fgColor='065F46')
+            c_out.font = Font(bold=True, color='FFFFFF', size=10, name='Calibri')
+            c_out.alignment = CC
+            ws.row_dimensions[1].height = 18
+            hdr_row = 2
+        else:
+            hdr_row = 1
 
-        # Header row
+        # Detect scaled columns
+        minmax_cols = [c for c in headers if c.endswith('_MinMax')]
+        zscore_cols = [c for c in headers if c.endswith('_ZScore')]
+
+        # Column header row
         for ci, h in enumerate(headers, 1):
-            cell = ws.cell(1, ci, value=h)
-            cell.fill = H_FILL; cell.font = H_FONT
-            cell.alignment = CC; cell.border = BDR
-        ws.row_dimensions[1].height = 22
+            cell = ws.cell(hdr_row, ci, value=h)
+            if h in minmax_cols:
+                cell.fill = ORG_FILL
+                cell.font = Font(bold=True, color='92400E', size=10, name='Calibri')
+            elif h in zscore_cols:
+                cell.fill = PUR_FILL
+                cell.font = Font(bold=True, color='4C1D95', size=10, name='Calibri')
+            else:
+                cell.fill = H_FILL
+                cell.font = H_FONT
+            cell.alignment = CC
+            cell.border = BDR
+        ws.row_dimensions[hdr_row].height = 22
 
-        # Data rows
-        for ri, (_, row) in enumerate(df.iterrows()):
-            r        = ri + 2
-            row_fill = ALT_FILL if ri % 2 == 0 else PatternFill()
+        active_stripe = 0
+        for ri, (_, row) in enumerate(df_final.iterrows()):
+            r       = ri + hdr_row + 1
+            sunday  = bool(is_off.iloc[ri]) if ri < len(is_off) else False
+            row_fill = SUN_FILL if sunday else (ALT_FILL if active_stripe % 2 == 0 else PatternFill())
+            if not sunday:
+                active_stripe += 1
+
             for ci, col in enumerate(headers, 1):
                 v    = row[col]
                 cell = ws.cell(r, ci, value=v)
                 cell.border = BDR
-                cell.fill   = row_fill
-                cell.font   = NORM_F
-                # Numbers right-aligned, text left-aligned
-                if isinstance(v, (int, float)):
-                    cell.alignment = RC
-                    if isinstance(v, float):
-                        cell.number_format = '0.0000'
+
+                if sunday:
+                    cell.fill = SUN_FILL
+                    if isinstance(v, (int, float)):
+                        cell.font = ZERO_FNT; cell.alignment = CC
+                    else:
+                        cell.font = SUN_FONT; cell.alignment = CC
+                elif col == 'Label_Compliant':
+                    cell.fill  = G_FILL if v == 1 else R_FILL
+                    cell.font  = G_FONT if v == 1 else R_FONT
+                    cell.value = '✓ Yes' if v == 1 else '✗ No'
+                    cell.alignment = CC
+                elif col == 'Date':
+                    cell.font = NORM_F; cell.alignment = CC
+                    if hasattr(v, 'strftime'):
+                        cell.value = v.strftime('%d-%b-%Y')
+                elif col in minmax_cols:
+                    cell.fill = ORG_FILL; cell.font = NORM_F; cell.alignment = RC
+                    cell.number_format = '0.000000'
+                elif col in zscore_cols:
+                    cell.fill = PUR_FILL; cell.font = NORM_F; cell.alignment = RC
+                    cell.number_format = '0.000000'
+                elif isinstance(v, float):
+                    cell.fill = row_fill; cell.font = NORM_F; cell.alignment = RC
+                    cell.number_format = '0.00'
+                elif isinstance(v, int):
+                    cell.fill = row_fill; cell.font = NORM_F; cell.alignment = RC
                 else:
-                    cell.alignment = LC
-            ws.row_dimensions[r].height = 16
+                    cell.fill = row_fill; cell.font = NORM_F; cell.alignment = LC
 
-        # Auto column widths
+            ws.row_dimensions[r].height = 17
+
+        ws.freeze_panes = f'A{hdr_row + 1}'
         for ci, col in enumerate(headers, 1):
-            max_len = max(len(str(col)), df[col].astype(str).str.len().max() if len(df) > 0 else 0)
-            ws.column_dimensions[get_column_letter(ci)].width = min(max(max_len + 2, 10), 30)
-
-        ws.freeze_panes = 'A2'
+            ws.column_dimensions[get_column_letter(ci)].width = 14
 
         # Summary row
-        sum_r = len(df) + 3
-        ws.merge_cells(f'A{sum_r}:{get_column_letter(len(headers))}{sum_r}')
-        outlier_str = f'  |  Outliers clamped: {sum(outlier_counts.values())} cells' if outlier_counts else ''
-        ws[f'A{sum_r}'].value     = (f'TOTAL: {total_rows} rows  |  {len(num_cols)} numeric columns normalised (Min-Max 0–1){outlier_str}')
-        ws[f'A{sum_r}'].font      = Font(bold=True, size=10, color='1E3A8A', name='Arial')
+        sum_r = total_rows + hdr_row + 2
+        ws.merge_cells(f'A{sum_r}:{get_column_letter(n_cols)}{sum_r}')
+        extra_info = ''
+        if scaling_log:
+            methods = sorted(set(v['method'] for v in scaling_log.values()))
+            extra_info = f'  |  Scaling: {", ".join(methods).upper()} applied ({len(scaling_log)} columns)'
+        if cat_encoding_log:
+            extra_info += f'  |  Categorical encoding: {encode_cats} ({len(cat_encoding_log)} columns)'
+        ws[f'A{sum_r}'].value = (
+            f'TOTAL: {active_cnt} active rows  |  {sunday_cnt} Sunday/Holiday rows  |  '
+            f'{compliant_cnt} MPCB Compliant  |  {sum(outlier_counts.values()) if outlier_counts else 0} outliers clamped'
+            f'{extra_info}'
+        )
+        ws[f'A{sum_r}'].font      = SUM_FONT
         ws[f'A{sum_r}'].alignment = LC
-        for ci in range(1, len(headers) + 1):
+        for ci in range(1, n_cols + 1):
             ws.cell(sum_r, ci).border = BDR
             ws.cell(sum_r, ci).fill   = SUM_FILL
+
+        # ── Sheet 2: Preprocessing Report ──────────────────────────────
+        ws2 = wb.create_sheet('Preprocessing Report')
+        ws2.column_dimensions['A'].width = 35
+        ws2.column_dimensions['B'].width = 50
+
+        report_rows = [
+            ('PREPROCESSING SUMMARY', ''),
+            ('File',        orig_name),
+            ('Dataset type', {'stp_excel':'STP Test Report (PMC)',
+                               'custom_excel':'Custom Excel',
+                               'scada_csv':'SCADA/Generic CSV'}.get(data_type, 'Generic')),
+            ('Total rows',  total_rows),
+            ('Active rows', active_cnt),
+            ('Sunday/Holiday rows', sunday_cnt),
+            ('Duplicates removed', dupes_removed),
+            ('Missing values filled', missing_before - missing_after),
+            ('Outlier columns clamped', len(outlier_counts)),
+            ('',''),
+            ('COLUMN MAPPING APPLIED', ''),
+        ]
+        if user_col_map:
+            for raw_c, mapped in user_col_map.items():
+                report_rows.append((f'  {raw_c}', f'→ {mapped}'))
+        else:
+            report_rows.append(('  (auto-detected STP format)', ''))
+
+        report_rows += [('',''), ('DATE NORMALIZATION', '')]
+        date_cols_found = [c for c in df_final.columns if 'date' in c.lower() or c == 'Date']
+        if date_cols_found:
+            for dc in date_cols_found:
+                report_rows.append((f'  {dc}', 'Parsed & normalized to DD-MMM-YYYY'))
+        else:
+            report_rows.append(('  No date column detected', ''))
+
+        if cat_encoding_log:
+            report_rows += [('',''), ('CATEGORICAL ENCODING', '')]
+            for col, info in cat_encoding_log.items():
+                if info['method'] == 'label':
+                    report_rows.append((f'  {col}', f'Label encoded ({len(info["map"])} categories)'))
+                else:
+                    report_rows.append((f'  {col}', f'One-hot: {", ".join(info["new_cols"])}'))
+
+        if scaling_log:
+            report_rows += [('',''), ('SCALING APPLIED', '')]
+            for col, info in scaling_log.items():
+                if info['method'] == 'minmax':
+                    report_rows.append((f'  {col}', f'Min-Max  [min={info["min"]:.4f}, max={info["max"]:.4f}]'))
+                else:
+                    report_rows.append((f'  {col}', f'Z-Score  [mean={info["mean"]:.4f}, std={info["std"]:.4f}]'))
+
+        if outlier_counts:
+            report_rows += [('',''), ('OUTLIERS CLAMPED (IQR×1.5)', '')]
+            for col, n in outlier_counts.items():
+                report_rows.append((f'  {col}', f'{n} values clamped'))
+
+        TIT_FONT = Font(bold=True, color='1E3A8A', size=11, name='Calibri')
+        for ri2, (k, v2) in enumerate(report_rows, 1):
+            ca = ws2.cell(ri2, 1, value=k)
+            cb = ws2.cell(ri2, 2, value=str(v2) if v2 != '' else '')
+            if k.isupper() and k != '':
+                ca.font = TIT_FONT
+                ca.fill = PatternFill('solid', fgColor='EFF6FF')
+            else:
+                ca.font = NORM_F
+            cb.font = NORM_F
+            ws2.row_dimensions[ri2].height = 16
 
         buf = io.BytesIO()
         wb.save(buf); buf.seek(0)
         encoded = base64.b64encode(buf.read()).decode()
+
         return jsonify({
-            'success':   True,
-            'rows':      total_rows,
-            'columns':   headers,
-            'outliers':  outlier_counts,
-            'data_type': 'scada_csv' if fname_lower.endswith('.csv') else 'generic',
-            'file':      encoded,
-            'filename':  out_fname
+            'success':        True,
+            'rows':           total_rows,
+            'active':         active_cnt,
+            'sundays':        sunday_cnt,
+            'compliant':      compliant_cnt,
+            'columns':        headers,
+            'outliers':       outlier_counts,
+            'missing_filled': missing_before - missing_after,
+            'dupes_removed':  dupes_removed,
+            'data_type':      data_type,
+            'encoding_log':   cat_encoding_log,
+            'scaling_log':    {k: v['method'] for k,v in scaling_log.items()},
+            'file':           encoded,
+            'filename':       out_fname
         })
 
     except Exception as e:
-        logger.error(str(e))
+        logger.error(f'preprocess_file error: {e}', exc_info=True)
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
