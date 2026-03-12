@@ -1673,3 +1673,77 @@ if __name__ == '__main__':
     print(f'  Status : http://localhost:{port}/api/status')
     print('=' * 55)
     app.run(debug=debug_mode, port=port, host='0.0.0.0')
+
+
+
+# ─────────────────────────────────────────────────────────────
+# WWTP DATA PREPROCESSING EXTENSIONS (Auto-clean + features)
+# ─────────────────────────────────────────────────────────────
+
+PARAMETER_MAP = {
+    'bod inlet':'bod_in',
+    'inlet bod':'bod_in',
+    'bod influent':'bod_in',
+    'bod outlet':'bod_out',
+    'outlet bod':'bod_out',
+    'bod effluent':'bod_out',
+    'cod inlet':'cod_in',
+    'inlet cod':'cod_in',
+    'cod outlet':'cod_out',
+    'outlet cod':'cod_out',
+    'tss inlet':'tss_in',
+    'inlet tss':'tss_in',
+    'tss outlet':'tss_out',
+    'ph inlet':'ph_in',
+    'ph outlet':'ph_out',
+    'faecal coliform':'fc',
+    'fecal coliform':'fc'
+}
+
+def clean_special_values(series):
+    import numpy as np
+    def convert(v):
+        if isinstance(v,str):
+            v=v.strip().lower()
+            if v.startswith('<'):
+                try:
+                    return float(v.replace('<',''))/2
+                except:
+                    return np.nan
+            if 'bdl' in v:
+                return 2.5
+        return v
+    return series.apply(convert)
+
+def normalize_wwtp_columns(df):
+    rename={}
+    for col in df.columns:
+        key=str(col).lower()
+        for k,v in PARAMETER_MAP.items():
+            if k in key:
+                rename[col]=v
+    return df.rename(columns=rename)
+
+def remove_non_sampling_rows(df):
+    mask=df.astype(str).apply(
+        lambda r:r.str.contains('sunday|holiday',case=False,regex=True)
+    ).any(axis=1)
+    return df[~mask].reset_index(drop=True)
+
+def add_removal_efficiency(df):
+    if {'bod_in','bod_out'}.issubset(df.columns):
+        df['bod_removal_%']=(df['bod_in']-df['bod_out'])/df['bod_in']*100
+    if {'cod_in','cod_out'}.issubset(df.columns):
+        df['cod_removal_%']=(df['cod_in']-df['cod_out'])/df['cod_in']*100
+    if {'tss_in','tss_out'}.issubset(df.columns):
+        df['tss_removal_%']=(df['tss_in']-df['tss_out'])/df['tss_in']*100
+    return df
+
+# Example helper pipeline
+def wwtp_preprocess_dataframe(df):
+    df=remove_non_sampling_rows(df)
+    df=normalize_wwtp_columns(df)
+    for c in df.columns:
+        df[c]=clean_special_values(df[c])
+    df=add_removal_efficiency(df)
+    return df
