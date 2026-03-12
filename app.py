@@ -10,7 +10,12 @@ from flask import Flask, request, jsonify, send_from_directory, Response
 import json, math, random, os, io, csv, base64, logging
 from datetime import datetime, timedelta
 import pandas as pd
-import polars as pl
+try:
+    import polars as pl
+    _POLARS_AVAILABLE = True
+except ImportError:
+    pl = None
+    _POLARS_AVAILABLE = False
 import numpy as np
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -45,6 +50,8 @@ def serve(path):
 
 # ── FAST PREPROCESSING USING POLARS ─────────────────────────────
 def fast_preprocess_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    if not _POLARS_AVAILABLE:
+        return df
     try:
         pldf = pl.from_pandas(df)
 
@@ -87,7 +94,6 @@ def fast_preprocess_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
         return pldf.to_pandas()
     except Exception:
-        # polars failed — return the original pandas df unchanged
         return df
 
 # ── PLANT DATABASE ─────────────────────────────────────────────────────────────
