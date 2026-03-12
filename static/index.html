@@ -562,20 +562,6 @@
             margin-top: 5px;
         }
 
-        /* Column Mapper */
-        .col-map-table { width:100%; border-collapse:collapse; font-size:0.88rem; }
-        .col-map-table th { background:#1e3a8a; color:white; padding:10px 14px; text-align:left; font-weight:600; }
-        .col-map-table td { padding:9px 14px; border-bottom:1px solid #e5e7eb; vertical-align:middle; }
-        .col-map-table tr:hover td { background:#f8fafc; }
-        .col-map-table select { width:100%; padding:7px 10px; border:1.5px solid #e5e7eb;
-            border-radius:7px; font-size:0.85rem; background:white; }
-        .col-map-table select:focus { border-color:#3b82f6; outline:none; }
-        .type-badge { display:inline-block; padding:2px 9px; border-radius:12px; font-size:0.72rem; font-weight:700; }
-        .type-numeric { background:#dbeafe; color:#1d4ed8; }
-        .type-datetime { background:#dcfce7; color:#166534; }
-        .type-categorical { background:#fef9c3; color:#854d0e; }
-        .type-text { background:#f3f4f6; color:#374151; }
-        .sample-vals { font-size:0.75rem; color:#9ca3af; margin-top:3px; font-style:italic; }
 
         @media (max-width: 768px) {
             .network-config, .prediction-horizon, .action-buttons, .metric-cards {
@@ -625,61 +611,6 @@
                     Supports .xlsx, .xls, .csv (MATLAB compatible)
                 </p>
                 <input type="file" id="fileInput" style="display: none;" accept=".xlsx,.xls,.csv" onchange="handleFileUpload(event)">
-            </div>
-        </div>
-
-        <!-- Column Mapper Panel (shown after scan) -->
-        <div id="colMapperCard" class="card" style="display:none;">
-            <div class="card-header">
-                <span class="card-icon">🗂️</span>
-                <h2>Column Mapping & Preprocessing Options</h2>
-            </div>
-            <p style="color:#6b7280;margin-bottom:18px;font-size:0.9rem;">
-                Your file has custom column names. Map each column to a WWTP parameter (or mark as <strong>Ignore</strong>),
-                then choose encoding and scaling options before downloading.
-            </p>
-
-            <!-- Preprocessing Options Row -->
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:24px;">
-                <div style="background:#eff6ff;border-radius:12px;padding:18px;border:1px solid #bfdbfe;">
-                    <label style="font-weight:700;color:#1e3a8a;font-size:0.92rem;display:block;margin-bottom:10px;">
-                        🔢 Categorical Encoding
-                    </label>
-                    <select id="encodeCatsSelect" style="width:100%;padding:10px;border:1.5px solid #bfdbfe;border-radius:8px;font-size:0.9rem;">
-                        <option value="label">Label Encoding (0, 1, 2…)</option>
-                        <option value="onehot">One-Hot Encoding (binary columns)</option>
-                        <option value="none">None (keep as-is)</option>
-                    </select>
-                    <p style="font-size:0.75rem;color:#6b7280;margin-top:6px;">Applied to text/category columns only</p>
-                </div>
-                <div style="background:#f0fdf4;border-radius:12px;padding:18px;border:1px solid #bbf7d0;">
-                    <label style="font-weight:700;color:#065f46;font-size:0.92rem;display:block;margin-bottom:10px;">
-                        📐 Numeric Scaling
-                    </label>
-                    <select id="scaleMethodSelect" style="width:100%;padding:10px;border:1.5px solid #bbf7d0;border-radius:8px;font-size:0.9rem;">
-                        <option value="none">None (raw values only)</option>
-                        <option value="minmax">Min-Max (0–1 range) — adds _MinMax columns</option>
-                        <option value="zscore">Z-Score (mean=0, std=1) — adds _ZScore columns</option>
-                        <option value="both">Both Min-Max + Z-Score</option>
-                    </select>
-                    <p style="font-size:0.75rem;color:#6b7280;margin-top:6px;">Scaled columns appended — originals preserved</p>
-                </div>
-            </div>
-
-            <!-- Column mapping table -->
-            <div id="colMapTable" style="overflow-x:auto;"></div>
-
-            <!-- Apply button -->
-            <div style="margin-top:20px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
-                <button class="btn btn-primary" onclick="applyColumnMapping()"
-                    style="padding:13px 28px;font-size:1rem;">
-                    ✅ Apply Mapping & Preprocess
-                </button>
-                <button class="btn btn-secondary" onclick="resetMapper()"
-                    style="padding:13px 20px;">
-                    ↺ Reset
-                </button>
-                <span id="mapperStatus" style="font-size:0.85rem;color:#6b7280;"></span>
             </div>
         </div>
 
@@ -1240,46 +1171,7 @@
         let _preprocessedB64  = null;   // base64 of processed xlsx — ready to download
         let _preprocessedName = null;   // filename for the download
 
-        // ── WWTP parameter options for mapper dropdowns ─────────────────────────
-        const WWTP_PARAM_OPTIONS = [
-            {id:'',              label:'-- Select mapping --'},
-            {id:'ignore',        label:'🚫 Ignore this column'},
-            {id:'date',          label:'📅 Date'},
-            {id:'day',           label:'#  Day number'},
-            {id:'plant',         label:'🏭 Plant name'},
-            // Influent
-            {id:'cod_inf',       label:'COD Influent (mg/L)'},
-            {id:'bod_inf',       label:'BOD Influent (mg/L)'},
-            {id:'tss_inf',       label:'TSS Influent (mg/L)'},
-            {id:'nh3_inf',       label:'NH3-N Influent (mg/L)'},
-            {id:'flow',          label:'Flow Rate (m³/d or MLD)'},
-            {id:'do',            label:'Dissolved Oxygen (mg/L)'},
-            {id:'mlss',          label:'MLSS (mg/L)'},
-            {id:'sludge_age',    label:'Sludge Age / SRT (days)'},
-            {id:'tmp',           label:'Transmembrane Pressure (kPa)'},
-            {id:'flux',          label:'Membrane Flux (LMH)'},
-            {id:'cycle_time',    label:'Cycle Time (h)'},
-            {id:'fill_time',     label:'Fill Time (h)'},
-            {id:'react_time',    label:'React Time (h)'},
-            {id:'tn_inf',        label:'Total Nitrogen Influent (mg/L)'},
-            {id:'internal_recycle', label:'Internal Recycle Ratio (%)'},
-            {id:'sludge_recycle',label:'Sludge Recycle Ratio (%)'},
-            {id:'tp_inf',        label:'Total Phosphorus Influent (mg/L)'},
-            {id:'stages',        label:'Anoxic Stages (count)'},
-            {id:'anaerobic_hrt', label:'Anaerobic HRT (h)'},
-            // Effluent
-            {id:'ph_in',         label:'pH Inlet'},
-            {id:'ph_out',        label:'pH Outlet'},
-            {id:'bod_out',       label:'BOD Outlet (mg/L)'},
-            {id:'cod_out',       label:'COD Outlet (mg/L)'},
-            {id:'tss_out',       label:'TSS Outlet (mg/L)'},
-            {id:'chlorine',      label:'Chlorine (mg/L)'},
-        ];
-
-        // ── Step 1: File dropped / selected ─────────────────────────────────
-        //    First scan columns → show mapper if custom, else preprocess directly
-        let _scannedColumns = [];   // columns info from /api/scan-columns
-
+        // ── Step 1: File dropped / selected — preprocess immediately ────────────
         async function parseAndStore(file) {
             _rawFile          = file;
             _preprocessedB64  = null;
@@ -1290,128 +1182,7 @@
             const plantType = document.getElementById('plantType').value;
             if (!plantType) { alert('Please select a Plant Type before uploading data.'); return; }
 
-            showUploadSpinner(file.name, file.size);
-
-            // Scan columns first
-            try {
-                const fd = new FormData();
-                fd.append('file', file, file.name);
-                fd.append('plantType', plantType);
-                const res  = await fetch(`${API}/scan-columns`, { method: 'POST', body: fd });
-                const data = await res.json();
-
-                if (!data.success) throw new Error(data.error || 'Scan failed');
-
-                _scannedColumns = data.columns;
-
-                // Check if all columns were auto-suggested (STP format)
-                const allMapped = data.columns.every(c => c.suggested !== null);
-                const hasCustomCols = data.columns.some(c => c.suggested === null);
-
-                if (hasCustomCols) {
-                    // Show mapper UI
-                    renderColumnMapper(data.columns, file.name, data.n_rows);
-                } else {
-                    // Auto-detected format — preprocess immediately
-                    await runPreprocessPipeline(file, {});
-                }
-            } catch(err) {
-                // Fallback: try direct preprocess
-                await runPreprocessPipeline(file, {});
-            }
-        }
-
-        // ── Render the column mapper table ───────────────────────────────────
-        function renderColumnMapper(columns, fileName, nRows) {
-            const card = document.getElementById('colMapperCard');
-            card.style.display = 'block';
-            card.scrollIntoView({ behavior: 'smooth' });
-
-            const mappedCount = columns.filter(c => c.suggested).length;
-            document.getElementById('mapperStatus').textContent =
-                `${columns.length} columns detected · ${mappedCount} auto-mapped · ${columns.length - mappedCount} need manual mapping`;
-
-            // Build table
-            const optionsHTML = WWTP_PARAM_OPTIONS.map(o =>
-                `<option value="${o.id}">${o.label}</option>`
-            ).join('');
-
-            const rows = columns.map((col, idx) => {
-                const typeBadge = `<span class="type-badge type-${col.type}">${col.type}</span>`;
-                const samples   = col.samples.slice(0,3).join(', ');
-                const suggested = col.suggested || '';
-
-                // Build select with suggested pre-selected
-                const selectOpts = WWTP_PARAM_OPTIONS.map(o =>
-                    `<option value="${o.id}" ${o.id === suggested ? 'selected' : ''}>${o.label}</option>`
-                ).join('');
-
-                return `<tr>
-                    <td style="font-weight:600;color:#1e3a8a;">${col.raw_name}</td>
-                    <td>${typeBadge}<div class="sample-vals">${samples}</div></td>
-                    <td>
-                        <select id="colmap_${idx}" data-raw="${col.raw_name}">
-                            ${selectOpts}
-                        </select>
-                    </td>
-                    <td style="text-align:center;">
-                        ${suggested ? '<span style="color:#065f46;font-size:1.1rem;">✓</span>' : '<span style="color:#f59e0b;font-size:1.1rem;">⚠</span>'}
-                    </td>
-                </tr>`;
-            }).join('');
-
-            document.getElementById('colMapTable').innerHTML = `
-                <table class="col-map-table">
-                    <thead>
-                        <tr>
-                            <th style="width:25%">Column in Your File</th>
-                            <th style="width:25%">Detected Type & Samples</th>
-                            <th style="width:40%">Map to WWTP Parameter</th>
-                            <th style="width:10%;text-align:center;">Status</th>
-                        </tr>
-                    </thead>
-                    <tbody>${rows}</tbody>
-                </table>
-            `;
-
-            // Reset upload zone to show file info
-            const zone = document.getElementById('uploadZone');
-            zone.innerHTML = `
-                <div class="upload-icon">📋</div>
-                <h3 style="color:#1e3a8a;">${fileName}</h3>
-                <p style="color:#6b7280;margin-top:6px;">${nRows} rows · ${columns.length} columns detected</p>
-                <p style="margin-top:6px;font-size:0.82rem;color:#1d4ed8;font-weight:600;">↓ Review and confirm column mapping below</p>
-                <input type="file" id="fileInput" style="display:none;" accept=".xlsx,.xls,.csv" onchange="handleFileUpload(event)">
-            `;
-        }
-
-        // ── Apply the mapping and trigger preprocess ─────────────────────────
-        async function applyColumnMapping() {
-            if (!_rawFile) { alert('No file loaded.'); return; }
-            const colMapping = {};
-            _scannedColumns.forEach((col, idx) => {
-                const sel = document.getElementById(`colmap_${idx}`);
-                if (sel && sel.value) colMapping[col.raw_name] = sel.value;
-            });
-
-            const scaleMethod = document.getElementById('scaleMethodSelect').value;
-            const encodeCats  = document.getElementById('encodeCatsSelect').value;
-
-            document.getElementById('mapperStatus').textContent = '⏳ Preprocessing with your mapping…';
-            await runPreprocessPipeline(_rawFile, colMapping, scaleMethod, encodeCats);
-        }
-
-        function resetMapper() {
-            document.getElementById('colMapperCard').style.display = 'none';
-            _scannedColumns = [];
-            // Reset upload zone
-            const zone = document.getElementById('uploadZone');
-            zone.innerHTML = `
-                <div class="upload-icon">⬆️</div>
-                <h3>Drop Excel file here or click to upload</h3>
-                <p style="color:#6b7280;margin-top:10px;">Supports .xlsx, .xls, .csv (MATLAB compatible)</p>
-                <input type="file" id="fileInput" style="display:none;" accept=".xlsx,.xls,.csv" onchange="handleFileUpload(event)">
-            `;
+            await runPreprocessPipeline(file);
         }
 
         function handleFileUpload(event) {
@@ -1439,35 +1210,20 @@
             }
         }
 
-        // ── API call ──────────────────────────────────────────────────────────
-        async function runPreprocessPipeline(file, colMapping={}, scaleMethod='none', encodeCats='label') {
+        // ── API call ─────────────────────────────────────────────────────────
+        async function runPreprocessPipeline(file) {
             const plantType = document.getElementById('plantType').value;
             if (!plantType) { alert('Please select a Plant Type before uploading data.'); return; }
 
             const btn = document.getElementById('btnDownloadPreprocessed');
             if (btn) { btn.disabled = true; btn.textContent = '⏳ Processing…'; }
 
-            // Show pipeline steps in spinner
-            const scaleLabel = {none:'',minmax:'Min-Max Scaling',zscore:'Z-Score Scaling',both:'Min-Max + Z-Score'};
-            const encLabel   = {none:'',label:'Label Encoding',onehot:'One-Hot Encoding'};
-            const steps = ['Date Normalisation','Imputation (ffill→mean)','IQR Outlier Clamping',
-                           encLabel[encodeCats], scaleLabel[scaleMethod]].filter(Boolean);
-            const zone = document.getElementById('uploadZone');
-            zone.innerHTML = `
-                <div class="upload-icon" style="animation:spin 1s linear infinite;">⚙️</div>
-                <h3 style="color:#1e3a8a;">Preprocessing <em>${file.name}</em>…</h3>
-                <p style="color:#6b7280;margin-top:6px;">${(file.size/1024).toFixed(1)} KB — Applying pipeline…</p>
-                <p style="margin-top:8px;font-size:0.78rem;color:#6b7280;">${steps.join(' → ')}</p>
-                <input type="file" id="fileInput" style="display:none;" accept=".xlsx,.xls,.csv" onchange="handleFileUpload(event)">
-            `;
+            showUploadSpinner(file.name, file.size);
 
             try {
                 const formData = new FormData();
-                formData.append('plantType',   plantType);
-                formData.append('file',        file, file.name);
-                formData.append('colMapping',  JSON.stringify(colMapping));
-                formData.append('scaleMethod', scaleMethod);
-                formData.append('encodeCats',  encodeCats);
+                formData.append('plantType', plantType);
+                formData.append('file',      file, file.name);
 
                 const res  = await fetch(`${API}/preprocess`, { method: 'POST', body: formData });
                 const data = await res.json();
@@ -1477,23 +1233,18 @@
                 _preprocessedName = data.filename;
 
                 const typeLabels = {
-                    stp_excel     : '📋 STP Test Report (PMC)',
-                    scada_csv     : '📡 SCADA/Generic CSV',
-                    custom_excel  : '🗂️ Custom Excel (mapped)',
-                    generic       : '📊 Generic Parameter Data'
+                    stp_excel : '📋 STP Test Report (PMC)',
+                    scada_csv : '📡 SCADA/Generic CSV',
+                    generic   : '📊 Generic Parameter Data'
                 };
 
-                // Build detail line
                 const details = [];
                 if (data.missing_filled) details.push(`${data.missing_filled} missing values filled`);
                 if (data.dupes_removed)  details.push(`${data.dupes_removed} duplicates removed`);
-                if (Object.keys(data.encoding_log||{}).length) details.push(`${Object.keys(data.encoding_log).length} cols encoded`);
-                if (Object.keys(data.scaling_log||{}).length)  details.push(`${Object.keys(data.scaling_log).length} scaled cols added`);
 
                 const label = typeLabels[data.data_type] || '📊 Preprocessed Data';
                 showUploadDone(file.name, file.size, data.rows, label, currentParams.length, data.filename);
 
-                // Show extra detail
                 if (details.length) {
                     const zone2 = document.getElementById('uploadZone');
                     const extra = document.createElement('p');
@@ -1501,11 +1252,6 @@
                     extra.textContent = '✦ ' + details.join('  ·  ');
                     zone2.appendChild(extra);
                 }
-
-                // Hide mapper after success
-                const mapCard = document.getElementById('colMapperCard');
-                if (mapCard) mapCard.style.display = 'none';
-                document.getElementById('mapperStatus').textContent = '';
 
                 if (btn) { btn.disabled = false; btn.textContent = '⬇ DOWNLOAD PREPROCESSED DATA'; }
 
