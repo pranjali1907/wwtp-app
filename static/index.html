@@ -1167,11 +1167,15 @@
 
         let _rawFile = null;
 
+        // Holds processed file data waiting for user to click download
+        let _preprocessedFile = null;   // { base64, filename, rows, active, sundays, columns }
+
         async function runPreprocessPipeline(file) {
             const plantType = document.getElementById('plantType').value;
             if (!plantType) { alert('Please select a Plant Type before uploading data.'); return; }
             const btn = document.getElementById('btnDownloadPreprocessed');
             if (btn) btn.disabled = true;
+            _preprocessedFile = null;
             showUploadSpinner(file.name, file.size);
             try {
                 const formData = new FormData();
@@ -1179,28 +1183,23 @@
                 formData.append('file', file, file.name);
                 const res = await fetch(`${API}/preprocess`, {
                     method: 'POST',
-                    body: formData   // multipart/form-data — no Content-Type header needed
+                    body: formData
                 });
-                if (!res.ok) {
-                    const err = await res.json().catch(() => ({}));
-                    throw new Error(err.error || `Server error ${res.status}`);
-                }
-                const avgParamsRaw = res.headers.get('X-Avg-Params');
-                const dataType     = res.headers.get('X-Data-Type') || 'generic';
-                const rowCount     = res.headers.get('X-Row-Count') || '?';
-                if (avgParamsRaw) { try { applyAvgToParams(JSON.parse(avgParamsRaw)); } catch(e) {} }
-                const blob = await res.blob();
-                const disposition = res.headers.get('Content-Disposition') || '';
-                const match = disposition.match(/filename=([^;]+)/);
-                const now = new Date();
-                const ts  = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}_${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}${String(now.getSeconds()).padStart(2,'0')}`;
-                const dlFname = match ? match[1].trim() : `${file.name.replace(/\.[^.]+$/,'')}_preprocessed_${ts}.xlsx`;
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url; a.download = dlFname; a.click();
-                URL.revokeObjectURL(url);
+                const data = await res.json();
+                if (!data.success) throw new Error(data.error || `Server error ${res.status}`);
+
+                // Store result — do NOT download yet
+                _preprocessedFile = {
+                    base64:   data.file,
+                    filename: data.filename,
+                    rows:     data.rows     || '?',
+                    active:   data.active   || '?',
+                    sundays:  data.sundays  || 0,
+                    columns:  data.columns  || []
+                };
+
                 const typeLabels = { stp_excel:'📋 STP Test Report (PMC)', scada_csv:'📡 SCADA Sensor Data', generic:'📊 Generic Parameter Data' };
-                showUploadDone(file.name, file.size, rowCount, typeLabels[dataType]||dataType, currentParams.length, dlFname);
+                showUploadDone(file.name, file.size, _preprocessedFile.rows, '📋 STP Test Report (PMC)', currentParams.length, _preprocessedFile.filename);
                 if (btn) { btn.textContent = '⬇ DOWNLOAD PREPROCESSED DATA'; btn.disabled = false; }
             } catch(err) {
                 showUploadError(file.name, file.size, 0, 0, currentParams.length, err.message);
@@ -1219,6 +1218,21 @@
                 </p>
                 <input type="file" id="fileInput" style="display:none;" accept=".xlsx,.xls,.csv" onchange="handleFileUpload(event)">
             `;
+        }
+
+        function showUploadReady(fileName, fileSize) {
+            const zone = document.getElementById('uploadZone');
+            zone.innerHTML = `
+                <div class="upload-icon">📂</div>
+                <h3 style="color:#1e3a8a;">${fileName}</h3>
+                <p style="color:#6b7280;margin-top:4px;">${(fileSize/1024).toFixed(1)} KB — File loaded successfully</p>
+                <p style="margin-top:8px;font-size:0.82rem;color:#0f766e;font-weight:600;">
+                    ✅ Ready — Click <strong>⬇ DOWNLOAD PREPROCESSED DATA</strong> below to process &amp; download
+                </p>
+                <input type="file" id="fileInput" style="display:none;" accept=".xlsx,.xls,.csv" onchange="handleFileUpload(event)">
+            `;
+            const btn = document.getElementById('btnDownloadPreprocessed');
+            if (btn) btn.disabled = false;
         }
 
         async function parseAndStore(file) {
@@ -1241,7 +1255,8 @@
                     }
                 } catch(e) {}
             }
-            await runPreprocessPipeline(file);
+            // File stored — user clicks ⬇ DOWNLOAD PREPROCESSED DATA to process & download
+            showUploadReady(file.name, file.size);
         }
 
         function handleFileUpload(event) {
@@ -1954,7 +1969,22 @@
             const plantType = document.getElementById('plantType').value;
             if (!plantType) { alert('Please select a Plant Type first.'); return; }
             if (!_rawFile)  { alert('Please drop a CSV or Excel file first.'); return; }
-            await runPreprocessPipeline(_rawFile);
+
+            // If not yet processed, run the pipeline first then download
+            if (!_preprocessedFile) {
+                await runPreprocessPipeline(_rawFile);
+            }
+
+            // Now download from stored base64
+            if (!_preprocessedFile) return; // pipeline failed
+            const byteChars = atob(_preprocessedFile.base64);
+            const byteArr   = new Uint8Array(byteChars.length);
+            for (let i = 0; i < byteChars.length; i++) byteArr[i] = byteChars.charCodeAt(i);
+            const blob = new Blob([byteArr], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+            const url  = URL.createObjectURL(blob);
+            const a    = document.createElement('a');
+            a.href = url; a.download = _preprocessedFile.filename; a.click();
+            URL.revokeObjectURL(url);
         }
         // ═══════════════════════════════════════════════════════════
         //  END BACKEND INTEGRATION
