@@ -10,6 +10,7 @@ from flask import Flask, request, jsonify, send_from_directory, Response
 import json, math, random, os, io, csv, base64, logging
 from datetime import datetime, timedelta
 import pandas as pd
+import polars as pl
 import numpy as np
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -40,6 +41,54 @@ def serve(path):
     if path and os.path.exists(os.path.join('static', path)):
         return send_from_directory('static', path)
     return send_from_directory('static', 'index.html')
+
+
+# ── FAST PREPROCESSING USING POLARS ─────────────────────────────
+def fast_preprocess_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    try:
+        pldf = pl.from_pandas(df)
+
+        # remove sunday/holiday rows
+        pldf = pldf.filter(
+            ~pl.any_horizontal(
+                pl.all().cast(pl.Utf8).str.contains("sunday|holiday", literal=False)
+            )
+        )
+
+        # clean < values
+        for c in pldf.columns:
+            pldf = pldf.with_columns(
+                pl.when(pl.col(c).cast(pl.Utf8).str.starts_with("<"))
+                .then(
+                    pl.col(c).cast(pl.Utf8).str.replace("<","").cast(pl.Float64)/2
+                )
+                .otherwise(pl.col(c))
+                .alias(c)
+            )
+
+        # feature engineering
+        if {"bod_in","bod_out"}.issubset(set(pldf.columns)):
+            pldf = pldf.with_columns(
+                ((pl.col("bod_in")-pl.col("bod_out"))/pl.col("bod_in")*100)
+                .alias("bod_removal_%")
+            )
+
+        if {"cod_in","cod_out"}.issubset(set(pldf.columns)):
+            pldf = pldf.with_columns(
+                ((pl.col("cod_in")-pl.col("cod_out"))/pl.col("cod_in")*100)
+                .alias("cod_removal_%")
+            )
+
+        if {"tss_in","tss_out"}.issubset(set(pldf.columns)):
+            pldf = pldf.with_columns(
+                ((pl.col("tss_in")-pl.col("tss_out"))/pl.col("tss_in")*100)
+                .alias("tss_removal_%")
+            )
+
+        return pldf.to_pandas()
+    except Exception:
+        df = fast_preprocess_dataframe(df)
+        return df
 
 # ── PLANT DATABASE ─────────────────────────────────────────────────────────────
 PLANT_PARAMS = {
@@ -471,7 +520,8 @@ def _replace_off_strings(df: pd.DataFrame) -> tuple:
         mask = df[col].astype(str).str.strip().str.lower().isin(OFF_STRINGS)
         replaced += int(mask.sum())
         df.loc[mask, col] = np.nan
-    return df, replaced
+    df = fast_preprocess_dataframe(df)
+        return df, replaced
 
 def _smart_read(file_bytes: bytes, fname_lower: str) -> pd.DataFrame:
     """Read any xlsx/xls/csv into a clean DataFrame."""
@@ -480,7 +530,8 @@ def _smart_read(file_bytes: bytes, fname_lower: str) -> pd.DataFrame:
             try:
                 df = pd.read_csv(io.BytesIO(file_bytes), encoding=enc,
                                  skip_blank_lines=True, na_values=list(OFF_STRINGS))
-                return df
+                df = fast_preprocess_dataframe(df)
+        return df
             except Exception:
                 continue
         raise ValueError("Cannot decode CSV — try saving as UTF-8.")
@@ -501,6 +552,7 @@ def _smart_read(file_bytes: bytes, fname_lower: str) -> pd.DataFrame:
             lt_mask = df.iloc[0].astype(str).str.strip().str.startswith('<').sum() >= 2
             if lt_mask:
                 df = df.iloc[1:].reset_index(drop=True)
+        df = fast_preprocess_dataframe(df)
         return df
 
 
@@ -1673,77 +1725,3 @@ if __name__ == '__main__':
     print(f'  Status : http://localhost:{port}/api/status')
     print('=' * 55)
     app.run(debug=debug_mode, port=port, host='0.0.0.0')
-
-
-
-# ─────────────────────────────────────────────────────────────
-# WWTP DATA PREPROCESSING EXTENSIONS (Auto-clean + features)
-# ─────────────────────────────────────────────────────────────
-
-PARAMETER_MAP = {
-    'bod inlet':'bod_in',
-    'inlet bod':'bod_in',
-    'bod influent':'bod_in',
-    'bod outlet':'bod_out',
-    'outlet bod':'bod_out',
-    'bod effluent':'bod_out',
-    'cod inlet':'cod_in',
-    'inlet cod':'cod_in',
-    'cod outlet':'cod_out',
-    'outlet cod':'cod_out',
-    'tss inlet':'tss_in',
-    'inlet tss':'tss_in',
-    'tss outlet':'tss_out',
-    'ph inlet':'ph_in',
-    'ph outlet':'ph_out',
-    'faecal coliform':'fc',
-    'fecal coliform':'fc'
-}
-
-def clean_special_values(series):
-    import numpy as np
-    def convert(v):
-        if isinstance(v,str):
-            v=v.strip().lower()
-            if v.startswith('<'):
-                try:
-                    return float(v.replace('<',''))/2
-                except:
-                    return np.nan
-            if 'bdl' in v:
-                return 2.5
-        return v
-    return series.apply(convert)
-
-def normalize_wwtp_columns(df):
-    rename={}
-    for col in df.columns:
-        key=str(col).lower()
-        for k,v in PARAMETER_MAP.items():
-            if k in key:
-                rename[col]=v
-    return df.rename(columns=rename)
-
-def remove_non_sampling_rows(df):
-    mask=df.astype(str).apply(
-        lambda r:r.str.contains('sunday|holiday',case=False,regex=True)
-    ).any(axis=1)
-    return df[~mask].reset_index(drop=True)
-
-def add_removal_efficiency(df):
-    if {'bod_in','bod_out'}.issubset(df.columns):
-        df['bod_removal_%']=(df['bod_in']-df['bod_out'])/df['bod_in']*100
-    if {'cod_in','cod_out'}.issubset(df.columns):
-        df['cod_removal_%']=(df['cod_in']-df['cod_out'])/df['cod_in']*100
-    if {'tss_in','tss_out'}.issubset(df.columns):
-        df['tss_removal_%']=(df['tss_in']-df['tss_out'])/df['tss_in']*100
-    return df
-
-# Example helper pipeline
-def wwtp_preprocess_dataframe(df):
-    df=remove_non_sampling_rows(df)
-    df=normalize_wwtp_columns(df)
-    for c in df.columns:
-        df[c]=clean_special_values(df[c])
-    df=add_removal_efficiency(df)
-    return df
