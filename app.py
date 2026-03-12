@@ -3,12 +3,17 @@ WWTP Neural Prediction System — Backend v3.0 (Production)
 Deploy : gunicorn --workers=4 --threads=2 --timeout=120 app:app
 Open   : https://your-app.onrender.com
 
-Requirements: pip install flask openpyxl gunicorn
+Requirements: pip install flask openpyxl pandas gunicorn
 """
 
 from flask import Flask, request, jsonify, send_from_directory, Response
 import json, math, random, os, io, csv, base64, logging
 from datetime import datetime, timedelta
+import pandas as pd
+import openpyxl
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+import hashlib
 
 # ── LOGGING (Production) ───────────────────────────────────────────────────────
 logging.basicConfig(
@@ -205,7 +210,6 @@ def gen_matlab(pt, params, nn_cfg, predicted, selected_input_ids, selected_outpu
 
     # Fallback if called without a pre-computed base name
     if mat_basename is None:
-        import hashlib
         hash_input = ''.join(f'{k}={v}' for k, v in sorted(params.items()))
         hex_hash   = hashlib.md5(hash_input.encode()).hexdigest()[:3]
         safe_pt    = ''.join(c for c in pt if c.isalnum())
@@ -466,12 +470,8 @@ def predict():
 def export_excel():
     if request.method == 'OPTIONS': return '',200
     try:
-        import openpyxl
-        from openpyxl.styles import (PatternFill, Font, Alignment, Border, Side,
-                                      GradientFill)
         from openpyxl.chart import BarChart, LineChart, Reference
         from openpyxl.chart.series import SeriesLabel
-        from openpyxl.utils import get_column_letter
         HAS_OPENPYXL = True
     except ImportError:
         HAS_OPENPYXL = False
@@ -1174,6 +1174,775 @@ def export_excel():
                     headers={'Content-Disposition': f'attachment; filename={fname}'})
 
 
+# ── SMART FILE PARSERS ────────────────────────────────────────────────────────
+
+def parse_stp_excel(file_bytes):
+    """
+    Parse PMC-style STP monthly Excel workbook.
+    Produces one row per calendar day per sheet (including Sundays/holidays as zeros).
+    Columns: day, date, plant, flow_mld, ph_in, bod_in, cod_in, tss_in,
+             ph_out, bod_out, cod_out, tss_out, chlorine, source_month, label_compliant
+    MPCB compliance: pH_Out 6.5–9.0, BOD_Out ≤ 30, COD_Out ≤ 150, TSS_Out ≤ 100
+    """
+
+    def safe_float(v):
+        try:    return float(v)
+        except: return None
+
+    def safe_int(v):
+        try:    return int(float(v))
+        except: return 0
+
+    wb      = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+    records = []
+
+    for sname in wb.sheetnames:
+        ws   = wb[sname]
+        rows = list(ws.iter_rows(values_only=True))
+
+        # Locate the parameter header row (contains both 'ph' and 'cod')
+        hdr_idx = None
+        for i, row in enumerate(rows):
+            cells = ' '.join(str(c).lower() for c in row if c)
+            if 'ph' in cells and 'cod' in cells:
+                hdr_idx = i
+                break
+        if hdr_idx is None:
+            continue
+
+        # Data starts 3 rows after header (header + blank + MPCB standard limits)
+        data_start = hdr_idx + 3
+
+        for row in rows[data_start:]:
+            if len(row) < 13:
+                continue
+            sr = row[1]
+            if sr is None:
+                continue
+
+            dt    = row[2]
+            plant = str(row[3]).strip() if row[3] else ''
+            mld   = safe_int(row[4])
+
+            # is_off only when the cell literally contains a day-off string (Sunday/Holiday)
+            # None (missing measurement) is NOT the same as a day off
+            cell5 = row[5]
+            is_off = isinstance(cell5, str) and cell5.strip().lower() in ('sunday', 'holiday', '')
+
+            if is_off:
+                rec = {
+                    'day': safe_int(sr), 'date': dt, 'plant': plant, 'flow_mld': mld,
+                    'ph_in': 0, 'bod_in': 0, 'cod_in': 0, 'tss_in': 0,
+                    'ph_out': 0, 'bod_out': 0, 'cod_out': 0, 'tss_out': 0,
+                    'chlorine': 0, 'source_month': sname, 'label_compliant': 0
+                }
+            else:
+                # Raw column order: pH, TSS, COD, BOD (Inlet), pH, TSS, COD, BOD (Outlet), FC
+                # None (partial missing) → 0, only Sunday string → full zero row
+                def v0(x): return safe_float(x) or 0
+                ph_in   = v0(row[5])
+                bod_in  = v0(row[6])   # raw TSS  → output column BOD_In
+                cod_in  = v0(row[7])
+                tss_in  = v0(row[8])   # raw BOD  → output column TSS_In
+                ph_out  = v0(row[9])
+                bod_out = v0(row[10])  # raw TSS  → output column BOD_Out
+                cod_out = v0(row[11])
+                tss_out = v0(row[12])  # raw BOD  → output column TSS_Out
+                chlorine= safe_int(row[13]) if len(row) > 13 and row[13] is not None else 0
+
+                # MPCB discharge standards — ALL outlet values must be >0 (0 = missing data)
+                compliant = (
+                    ph_out  > 0 and 6.5 <= ph_out <= 9.0 and
+                    bod_out > 0 and bod_out <= 30  and
+                    cod_out > 0 and cod_out <= 150 and
+                    tss_out > 0 and tss_out <= 100
+                )
+                rec = {
+                    'day': safe_int(sr), 'date': dt, 'plant': plant, 'flow_mld': mld,
+                    'ph_in': ph_in, 'bod_in': bod_in, 'cod_in': cod_in, 'tss_in': tss_in,
+                    'ph_out': ph_out, 'bod_out': bod_out, 'cod_out': cod_out, 'tss_out': tss_out,
+                    'chlorine': chlorine, 'source_month': sname,
+                    'label_compliant': 1 if compliant else 0
+                }
+            records.append(rec)
+
+    return records
+
+
+def parse_scada_csv(file_bytes):
+    """
+    Parse high-frequency SCADA CSV (1-min interval, 85 columns).
+    Extracts the 25 most relevant WWTP sensor columns.
+    """
+    import csv, io as sio
+    text   = file_bytes.decode('utf-8', errors='replace')
+    reader = csv.DictReader(sio.StringIO(text))
+    raw_rows = []
+    for row in reader:
+        clean = {k.replace('\r\n', ' ').replace('\n', ' ').strip(): v for k, v in row.items()}
+        raw_rows.append(clean)
+
+    KEY_PATTERNS = {
+        'do_re1':      'DO - RE1',
+        'do_re2':      'DO - RE2',
+        'do_re3':      'DO - RE3',
+        'do_re4':      'DO - RE4',
+        'ph_a':        'pH - Stage A',
+        'ph_b':        'pH - Stage B',
+        'turbidity_a': 'Turbidity - Stage A',
+        'turbidity_b': 'Turbidity - Stage B',
+        'ammonia_a':   'Ammonia concentration - Stage A',
+        'ammonia_b':   'Ammonia - Stage B',
+        'mlss_a':      'RAS TSS - Stage A',
+        'mlss_b':      'RAS TSS - Stage B',
+        'solids_re1':  'Solids Concentration - RE1',
+        'solids_re2':  'Solids Concentration - RE2',
+        'nh3_re1':     'Ammonia Concentration - RE1',
+        'nh3_re2':     'Ammonia Concentration - RE2',
+        'no3_re1':     'Nitrate Concentration - RE1',
+        'no3_re2':     'Nitrate Concentration - RE2',
+        'flow_r1':     'Feed Flow to Reactor1',
+        'flow_r2':     'Feed Flow to Reactor2',
+        'pe_ammonia':  'Primary Effluent Ammonia',
+        'pe_cod':      'Primary Effluent COD',
+        'raw_ph':      'Raw sewage pH',
+        'raw_tss':     'Raw sewage Tss',
+        'raw_cond':    'Raw sewage Conductivity',
+    }
+    col_map = {}
+    if raw_rows:
+        for pid, pattern in KEY_PATTERNS.items():
+            for col in raw_rows[0].keys():
+                if pattern.lower() in col.lower():
+                    col_map[pid] = col
+                    break
+    records = []
+    for row in raw_rows:
+        rec = {'time': row.get('Time', '')}
+        for pid, col in col_map.items():
+            try:    rec[pid] = float(row.get(col, ''))
+            except: rec[pid] = None
+        records.append(rec)
+    return records, col_map
+
+
+# ── PREPROCESSING ROUTE ───────────────────────────────────────────────────────
+# ── DATA PREPROCESS API ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
+# FILE PREPROCESSING API
+# ─────────────────────────────────────────────────────────
+@app.route('/api/preprocess', methods=['POST','OPTIONS'])
+def preprocess_file():
+
+    if request.method == "OPTIONS":
+        return '',200
+
+    try:
+
+        if 'file' not in request.files:
+            return jsonify({
+                "success":False,
+                "error":"No file uploaded"
+            }),400
+
+        file = request.files['file']
+        filename = file.filename.lower()
+
+
+        # ───── READ FILE ─────
+        if filename.endswith(".csv"):
+            df = pd.read_csv(file)
+
+        elif filename.endswith(".xlsx") or filename.endswith(".xls"):
+            df = pd.read_excel(file)
+
+        else:
+            return jsonify({
+                "success":False,
+                "error":"Unsupported file format"
+            }),400
+
+
+        # ─────────────────────────────────
+        # CLEAN DATASET
+        # ─────────────────────────────────
+
+        # remove empty rows
+        df = df.dropna(how="all")
+
+        # remove empty columns
+        df = df.dropna(axis=1, how="all")
+
+        # remove report text rows (keep rows containing numbers)
+        df = df[df.apply(lambda r: r.astype(str).str.contains(r'\d').any(), axis=1)]
+
+        # reset index
+        df = df.reset_index(drop=True)
+
+        # clean column names
+        df.columns = [
+            str(c)
+            .strip()
+            .lower()
+            .replace(" ","_")
+            .replace("-","_")
+            for c in df.columns
+        ]
+
+        # fill missing values
+        df = df.fillna(method="ffill")
+
+
+        # ─────────────────────────────────
+        # NORMALIZE NUMERIC DATA
+        # ─────────────────────────────────
+        numeric_cols = df.select_dtypes(include=["int64","float64"]).columns
+
+        for col in numeric_cols:
+
+            min_val = df[col].min()
+            max_val = df[col].max()
+
+            if max_val != min_val:
+                df[col] = (df[col] - min_val) / (max_val - min_val)
+
+
+        # ─────────────────────────────────
+        # SAVE CLEAN FILE
+        # ─────────────────────────────────
+        output = io.BytesIO()
+
+        df.to_excel(output, index=False)
+
+        output.seek(0)
+
+        encoded_file = base64.b64encode(output.read()).decode()
+
+
+        return jsonify({
+            "success":True,
+            "rows":len(df),
+            "columns":list(df.columns),
+            "file":encoded_file,
+            "filename":"cleaned_dataset.xlsx"
+        })
+
+
+    except Exception as e:
+
+        logger.error(str(e))
+
+        return jsonify({
+            "success":False,
+            "error":str(e)
+        }),500
+
+        # ── BASIC PREPROCESSING ──
+        df.columns = [c.strip().lower() for c in df.columns]
+
+        # Remove empty rows
+        df = df.dropna(how='all')
+
+        # Fill missing values with column mean
+        df = df.fillna(df.mean(numeric_only=True))
+
+        # Normalize numeric columns
+        numeric_cols = df.select_dtypes(include=['float64','int64']).columns
+        for col in numeric_cols:
+            min_val = df[col].min()
+            max_val = df[col].max()
+            if max_val != min_val:
+                df[col] = (df[col] - min_val) / (max_val - min_val)
+
+        df = df.reset_index(drop=True)
+
+        # Save processed file
+        output = io.BytesIO()
+        df.to_excel(output, index=False)
+        output.seek(0)
+
+        encoded = base64.b64encode(output.read()).decode()
+
+        return jsonify({
+            'success': True,
+            'rows': len(df),
+            'columns': list(df.columns),
+            'file': encoded,
+            'filename': 'preprocessed_dataset.xlsx'
+        })
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+    # ── Branch: PMC STP Excel ─────────────────────────────────
+    if file_bytes and ext in ('xlsx', 'xls'):
+        records   = parse_stp_excel(file_bytes)
+        data_type = 'stp_excel'
+
+    # ── Branch: SCADA CSV ─────────────────────────────────────
+    elif file_bytes and ext == 'csv':
+        records, col_map = parse_scada_csv(file_bytes)
+        data_type = 'scada_csv'
+        col_labels = {
+            'do_re1':'DO RE1 (mg/L)', 'do_re2':'DO RE2 (mg/L)',
+            'do_re3':'DO RE3 (mg/L)', 'do_re4':'DO RE4 (mg/L)',
+            'ph_a':'pH Stage A',      'ph_b':'pH Stage B',
+            'turbidity_a':'Turbidity A (NTU)', 'turbidity_b':'Turbidity B (NTU)',
+            'ammonia_a':'Ammonia A (mg/L)',     'ammonia_b':'Ammonia B (mg/L)',
+            'mlss_a':'MLSS A (gr/L)',           'mlss_b':'MLSS B (gr/L)',
+            'solids_re1':'Solids RE1 (gr/L)',   'solids_re2':'Solids RE2 (gr/L)',
+            'nh3_re1':'NH3 RE1 (mg/L)',         'nh3_re2':'NH3 RE2 (mg/L)',
+            'no3_re1':'NO3 RE1 (mg/L)',         'no3_re2':'NO3 RE2 (mg/L)',
+            'flow_r1':'Flow R1 (m3/hr)',        'flow_r2':'Flow R2 (m3/hr)',
+            'pe_ammonia':'PE Ammonia (mg/L)',   'pe_cod':'PE COD (mg/L)',
+            'raw_ph':'Raw pH',                  'raw_tss':'Raw TSS (mg/L)',
+            'raw_cond':'Raw Conductivity',
+        }
+
+    # ── Branch: generic frontend rows fallback ────────────────
+    else:
+        pdata     = PLANT_PARAMS.get(pt, {})
+        inputs    = pdata.get('inputs', [])
+        param_map_pp = {p['id']: p for p in inputs}
+        data_type = 'generic'
+        for row in raw_rows:
+            rec = {}
+            for pid, val in row.items():
+                if pid in param_map_pp:
+                    try:    rec[pid] = float(val)
+                    except: rec[pid] = None
+            if rec: records.append(rec)
+        col_labels = {p['id']: f"{p['label']} ({p['unit']})" for p in inputs}
+
+    if not records:
+        return jsonify({'success': False, 'error': 'No valid data rows could be parsed from the file.'}), 400
+
+    n_rows = len(records)
+
+    # ══════════════════════════════════════════════════════════════════
+    # STP EXCEL — build the exact target output format
+    # ══════════════════════════════════════════════════════════════════
+    if data_type == 'stp_excel':
+
+        # Style helpers
+        THIN   = Side(style='thin',   color='BDC3C7')
+        MEDIUM = Side(style='medium', color='1A5276')
+        BDR    = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+        BDR_M  = Border(left=MEDIUM, right=MEDIUM, top=MEDIUM, bottom=MEDIUM)
+        C      = Alignment(horizontal='center', vertical='center')
+        L      = Alignment(horizontal='left',   vertical='center')
+        R      = Alignment(horizontal='right',  vertical='center')
+
+        H_FILL  = PatternFill('solid', fgColor='1A5276')
+        H_FONT  = Font(bold=True, color='FFFFFF', size=10, name='Calibri')
+        T_FILL  = PatternFill('solid', fgColor='0D1B2A')
+        T_FONT  = Font(bold=True, color='FFFFFF', size=12, name='Calibri')
+        ALT     = PatternFill('solid', fgColor='EAF2FF')
+        OFF_F   = PatternFill('solid', fgColor='F5F5F5')
+        OFF_FT  = Font(italic=True, color='AAAAAA', size=10, name='Calibri')
+        G_FILL  = PatternFill('solid', fgColor='D5F5E3')
+        R_FILL  = PatternFill('solid', fgColor='FADBD8')
+        Y_FILL  = PatternFill('solid', fgColor='FEF9E7')
+        NORM_F  = Font(size=10, name='Calibri')
+
+        wb  = openpyxl.Workbook()
+        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        # ─── SHEET 1: Preprocessed Clean Data (matches target exactly) ───
+        ws1        = wb.active
+        ws1.title  = 'Preprocessed Clean Data'
+
+        HEADERS = ['Day', 'Date', 'Plant', 'Flow_MLD',
+                   'pH_In', 'BOD_In', 'COD_In', 'TSS_In',
+                   'pH_Out', 'BOD_Out', 'COD_Out', 'TSS_Out',
+                   'Chlorine', 'Source_Month', 'Label_Compliant']
+        COL_W   = [6, 14, 14, 10, 8, 10, 10, 10, 8, 10, 10, 10, 10, 24, 16]
+
+        # Title row
+        ws1.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(HEADERS))
+        tc = ws1.cell(1, 1, value=f'WWTP STP — Preprocessed Clean Dataset  |  {n_rows} records  |  {now_str}')
+        tc.fill = T_FILL; tc.font = T_FONT; tc.alignment = C
+        tc.border = BDR
+        ws1.row_dimensions[1].height = 24
+
+        # Header row
+        for ci, h in enumerate(HEADERS, 1):
+            c = ws1.cell(2, ci, value=h)
+            c.fill = H_FILL; c.font = H_FONT; c.alignment = C; c.border = BDR
+        ws1.row_dimensions[2].height = 20
+
+        # Data rows
+        for ri, rec in enumerate(records, 3):
+            is_off = rec.get('label_compliant') == 0 and rec.get('bod_in') == 0 and rec.get('cod_in') == 0
+
+            dt_val = rec['date']
+            if hasattr(dt_val, 'strftime'):
+                dt_str = dt_val.strftime('%Y-%m-%d')
+            else:
+                dt_str = str(dt_val)[:10] if dt_val else ''
+
+            vals = [
+                rec['day'], dt_str, rec['plant'], rec['flow_mld'],
+                rec['ph_in'],  rec['bod_in'],  rec['cod_in'],  rec['tss_in'],
+                rec['ph_out'], rec['bod_out'], rec['cod_out'], rec['tss_out'],
+                rec['chlorine'], rec['source_month'], rec['label_compliant']
+            ]
+
+            row_fill = OFF_F if is_off else (ALT if ri % 2 == 0 else PatternFill())
+            row_font = OFF_FT if is_off else NORM_F
+
+            for ci, v in enumerate(vals, 1):
+                cell = ws1.cell(ri, ci, value=v)
+                cell.border = BDR
+                cell.font   = row_font
+                cell.alignment = L if ci in (3, 14) else C
+
+                if ci == 15:  # Label_Compliant
+                    cell.fill = G_FILL if v == 1 else (R_FILL if is_off else Y_FILL)
+                    cell.font = Font(bold=True, size=10, name='Calibri',
+                                     color='1E8449' if v == 1 else 'C0392B')
+                else:
+                    cell.fill = row_fill
+
+        ws1.freeze_panes = 'A3'
+        for ci, w in enumerate(COL_W, 1):
+            ws1.column_dimensions[get_column_letter(ci)].width = w
+
+        # ─── SHEET 2: Statistics Summary ─────────────────────────────
+        ws2 = wb.create_sheet('Statistics')
+        num_fields = ['ph_in','bod_in','cod_in','tss_in','ph_out','bod_out','cod_out','tss_out','chlorine']
+        field_labels = {
+            'ph_in':'pH Inlet','bod_in':'BOD Inlet (mg/L)','cod_in':'COD Inlet (mg/L)',
+            'tss_in':'TSS Inlet (mg/L)','ph_out':'pH Outlet','bod_out':'BOD Outlet (mg/L)',
+            'cod_out':'COD Outlet (mg/L)','tss_out':'TSS Outlet (mg/L)','chlorine':'Chlorine (FC)',
+        }
+        mpcb = {'bod_out':'≤ 30','cod_out':'≤ 150','tss_out':'≤ 100','ph_out':'6.5 – 9.0'}
+
+        ws2.merge_cells(start_row=1, start_column=1, end_row=1, end_column=10)
+        tc2 = ws2.cell(1, 1, value='DESCRIPTIVE STATISTICS  |  PMC STP Dataset')
+        tc2.fill = T_FILL; tc2.font = T_FONT; tc2.alignment = C; tc2.border = BDR
+        ws2.row_dimensions[1].height = 24
+
+        stat_hdrs = ['Parameter','Count','Missing','Mean','Std Dev','Min','Max','MPCB Standard']
+        for ci, h in enumerate(stat_hdrs, 1):
+            c = ws2.cell(2, ci, value=h)
+            c.fill = H_FILL; c.font = H_FONT; c.alignment = C; c.border = BDR
+        ws2.row_dimensions[2].height = 20
+
+        active_recs = [r for r in records if not (r.get('bod_in') == 0 and r.get('cod_in') == 0)]
+        off_count   = n_rows - len(active_recs)
+
+        for ri, fld in enumerate(num_fields, 3):
+            vals = [r[fld] for r in active_recs if r.get(fld) not in (None, 0) or fld not in ('ph_in','ph_out')]
+            nums = [v for v in [r[fld] for r in active_recs] if v is not None and v != 0]
+            miss = len(active_recs) - len(nums)
+            mean = round(sum(nums)/len(nums), 3) if nums else 0
+            std  = round(math.sqrt(sum((x-mean)**2 for x in nums)/len(nums)), 3) if nums else 0
+            mn   = round(min(nums), 3) if nums else 0
+            mx   = round(max(nums), 3) if nums else 0
+            std_str = mpcb.get(fld, '—')
+            row_vals = [field_labels.get(fld, fld), len(nums), miss, mean, std, mn, mx, std_str]
+            fill = ALT if ri % 2 == 0 else PatternFill()
+            for ci, v in enumerate(row_vals, 1):
+                cell = ws2.cell(ri, ci, value=v)
+                cell.border = BDR; cell.fill = fill; cell.alignment = C if ci != 1 else L
+                cell.font = NORM_F
+        ws2.freeze_panes = 'A3'
+        for ci, w in enumerate([22,8,8,10,10,10,10,16], 1):
+            ws2.column_dimensions[get_column_letter(ci)].width = w
+
+        # ─── SHEET 3: MPCB Compliance Summary ────────────────────────
+        ws3 = wb.create_sheet('MPCB Compliance')
+        ws3.merge_cells(start_row=1, start_column=1, end_row=1, end_column=6)
+        tc3 = ws3.cell(1, 1, value='MPCB DISCHARGE STANDARDS — Compliance Summary')
+        tc3.fill = T_FILL; tc3.font = T_FONT; tc3.alignment = C; tc3.border = BDR
+        ws3.row_dimensions[1].height = 24
+        for ci, h in enumerate(['Plant','Total Days','Active Days','Compliant','Non-Compliant','% Compliance'], 1):
+            c = ws3.cell(2, ci, value=h)
+            c.fill = H_FILL; c.font = H_FONT; c.alignment = C; c.border = BDR
+
+        plants = sorted(set(r['plant'] for r in records if r['plant']))
+        for ri, plant in enumerate(plants + ['ALL PLANTS'], 3):
+            if plant == 'ALL PLANTS':
+                p_recs = records
+            else:
+                p_recs = [r for r in records if r['plant'] == plant]
+            total   = len(p_recs)
+            active  = len([r for r in p_recs if not (r.get('bod_in') == 0 and r.get('cod_in') == 0)])
+            comp    = sum(r['label_compliant'] for r in p_recs)
+            non_c   = active - comp
+            pct     = round(comp / active * 100, 1) if active else 0
+            fill    = G_FILL if pct >= 80 else (Y_FILL if pct >= 60 else R_FILL)
+            bold    = plant == 'ALL PLANTS'
+            row_v   = [plant, total, active, comp, non_c, f'{pct}%']
+            for ci, v in enumerate(row_v, 1):
+                cell = ws3.cell(ri, ci, value=v)
+                cell.border = BDR; cell.alignment = C if ci != 1 else L
+                cell.font   = Font(bold=bold, size=10, name='Calibri')
+                cell.fill   = fill if ci == 6 else (ALT if ri % 2 == 0 else PatternFill())
+        ws3.freeze_panes = 'A3'
+        for ci, w in enumerate([18,12,12,12,14,14], 1):
+            ws3.column_dimensions[get_column_letter(ci)].width = w
+
+        # ─── SHEET 4: Monthly Averages ────────────────────────────────
+        ws4 = wb.create_sheet('Monthly Averages')
+        ws4.merge_cells(start_row=1, start_column=1, end_row=1, end_column=10)
+        tc4 = ws4.cell(1, 1, value='MONTHLY AVERAGES — Active Days Only (Sundays/Holidays Excluded)')
+        tc4.fill = T_FILL; tc4.font = T_FONT; tc4.alignment = C; tc4.border = BDR
+        ws4.row_dimensions[1].height = 24
+        avg_hdrs = ['Source Month','Plant','Days','pH_In','BOD_In','COD_In','TSS_In','pH_Out','BOD_Out','COD_Out','TSS_Out','% Compliant']
+        for ci, h in enumerate(avg_hdrs, 1):
+            c = ws4.cell(2, ci, value=h)
+            c.fill = H_FILL; c.font = H_FONT; c.alignment = C; c.border = BDR
+
+        months_order = []
+        seen = set()
+        for r in records:
+            k = r['source_month']
+            if k not in seen:
+                months_order.append(k); seen.add(k)
+
+        def col_avg(recs, fld):
+            v = [r[fld] for r in recs if r.get(fld) not in (None,) and r.get(fld) != 0]
+            return round(sum(v)/len(v), 2) if v else 0
+
+        for ri, mo in enumerate(months_order, 3):
+            mo_recs  = [r for r in records if r['source_month'] == mo]
+            active_r = [r for r in mo_recs if not (r.get('bod_in')==0 and r.get('cod_in')==0)]
+            if not active_r: continue
+            comp_pct = round(sum(r['label_compliant'] for r in active_r)/len(active_r)*100, 1)
+            plant    = active_r[0]['plant'] if active_r else ''
+            row_v    = [mo, plant, len(active_r),
+                        col_avg(active_r,'ph_in'),  col_avg(active_r,'bod_in'),
+                        col_avg(active_r,'cod_in'),  col_avg(active_r,'tss_in'),
+                        col_avg(active_r,'ph_out'),  col_avg(active_r,'bod_out'),
+                        col_avg(active_r,'cod_out'),  col_avg(active_r,'tss_out'),
+                        f'{comp_pct}%']
+            fill = ALT if ri % 2 == 0 else PatternFill()
+            for ci, v in enumerate(row_v, 1):
+                cell = ws4.cell(ri, ci, value=v)
+                cell.border = BDR; cell.fill = fill; cell.alignment = C if ci != 1 else L
+                cell.font   = NORM_F
+        ws4.freeze_panes = 'A3'
+        for ci, w in enumerate([26,14,7,8,9,9,9,8,9,9,9,12], 1):
+            ws4.column_dimensions[get_column_letter(ci)].width = w
+
+        # Build avg_clean from active records for model input fill
+        avg_clean = {}
+        active_all = [r for r in records if not (r.get('bod_in')==0 and r.get('cod_in')==0)]
+        for fld in ['ph_in','bod_in','cod_in','tss_in','ph_out','bod_out','cod_out','tss_out']:
+            v = [r[fld] for r in active_all if r.get(fld) not in (None,) and r.get(fld) != 0]
+            avg_clean[fld] = round(sum(v)/len(v), 4) if v else 0
+        # map to PLANT_PARAMS ids
+        stp_to_param = {
+            'ph_in':'ph', 'bod_in':'bod_inf', 'cod_in':'cod_inf', 'tss_in':'tss_inf',
+        }
+        param_avg = {stp_to_param[k]: v for k, v in avg_clean.items() if k in stp_to_param}
+
+        buf  = io.BytesIO()
+        wb.save(buf); buf.seek(0)
+        ts    = datetime.now().strftime('%Y%m%d_%H%M%S')
+        base  = file_name.rsplit('.', 1)[0] if file_name else 'stp_data'
+        fname = f'{base}_preprocessed_{ts}.xlsx'
+        return Response(
+            buf.read(),
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            headers={
+                'Content-Disposition': f'attachment; filename={fname}',
+                'X-Avg-Params': json.dumps(param_avg),
+                'X-Data-Type':  'stp_excel',
+                'X-Row-Count':  str(n_rows),
+            }
+        )
+
+    # ══════════════════════════════════════════════════════════════════
+    # SCADA CSV or GENERIC — numeric pipeline preprocessing
+    # ══════════════════════════════════════════════════════════════════
+    num_cols = [k for k in records[0].keys() if k not in ('date','plant','sheet','time','source_month','label_compliant','day','flow_mld')]
+
+    def safe_stats(vals):
+        nums = [v for v in vals if v is not None and not (isinstance(v,float) and math.isnan(v))]
+        miss = len(vals) - len(nums)
+        if not nums:
+            return dict(count=0, missing=miss, mean=None, std=None, min=None, max=None, q1=None, q3=None)
+        n = len(nums); s = sorted(nums)
+        mean = sum(nums)/n
+        std  = math.sqrt(sum((x-mean)**2 for x in nums)/n)
+        def pct(p):
+            idx = (n-1)*p/100; lo, hi = int(idx), min(int(idx)+1, n-1)
+            return s[lo] + (s[hi]-s[lo])*(idx-lo)
+        return dict(count=n, missing=miss, mean=round(mean,4), std=round(std,4),
+                    min=round(s[0],4), max=round(s[-1],4), q1=round(pct(25),4), q3=round(pct(75),4))
+
+    cols_raw  = {}
+    for rec in records:
+        for col in num_cols:
+            cols_raw.setdefault(col, [])
+            cols_raw[col].append(rec.get(col))
+
+    raw_stats = {c: safe_stats(v) for c, v in cols_raw.items()}
+
+    # Step 1: Mean imputation
+    imputed = {}
+    for col, vals in cols_raw.items():
+        mean_v = raw_stats[col]['mean'] or 0
+        imputed[col] = [v if v is not None else round(mean_v, 4) for v in vals]
+
+    # Step 2: IQR outlier clamping
+    outlier_log = {}
+    clamped = {}
+    for col, vals in imputed.items():
+        s  = raw_stats[col]
+        q1 = s['q1'] or s['min'] or 0
+        q3 = s['q3'] or s['max'] or 1
+        iqr = q3 - q1; lo_f = q1 - 1.5*iqr; hi_f = q3 + 1.5*iqr
+        n_out = 0; cleaned = []
+        for v in vals:
+            if v < lo_f:   cleaned.append(round(lo_f,4)); n_out += 1
+            elif v > hi_f: cleaned.append(round(hi_f,4)); n_out += 1
+            else:          cleaned.append(round(v,4))
+        clamped[col] = cleaned; outlier_log[col] = n_out
+
+    # Step 3: Min-Max normalisation
+    normalized = {}
+    for col, vals in clamped.items():
+        lo = min(vals); hi = max(vals); span = hi-lo if hi!=lo else 1
+        normalized[col] = [round((v-lo)/span, 6) for v in vals]
+
+    # Step 4: Z-score standardisation
+    standardized = {}
+    for col, vals in clamped.items():
+        mean = sum(vals)/len(vals)
+        std  = math.sqrt(sum((x-mean)**2 for x in vals)/len(vals)) or 1
+        standardized[col] = [round((v-mean)/std, 6) for v in vals]
+
+    avg_clean = {col: round(sum(v)/len(v),4) for col, v in clamped.items() if v}
+    clean_stats = {c: safe_stats(v) for c, v in clamped.items()}
+
+    # ── Build Excel report ────────────────────────────────────
+    THIN  = Side(style='thin',   color='CBD5E1')
+    BDR   = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+    C     = Alignment(horizontal='center', vertical='center')
+    L     = Alignment(horizontal='left',   vertical='center')
+    R     = Alignment(horizontal='right',  vertical='center')
+    WRAP  = Alignment(horizontal='left',   vertical='center', wrap_text=True)
+    H_FILL= PatternFill('solid', fgColor='1E3A8A')
+    H_FONT= Font(bold=True, color='FFFFFF', size=10, name='Arial')
+    T_FILL= PatternFill('solid', fgColor='0F172A')
+    T_FONT= Font(bold=True, color='FFFFFF', size=12, name='Arial')
+    ALT   = PatternFill('solid', fgColor='F8FAFC')
+    G_FILL= PatternFill('solid', fgColor='D1FAE5')
+    Y_FILL= PatternFill('solid', fgColor='FEF3C7')
+
+    def mk_title(ws, row, text, span):
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=span)
+        c = ws.cell(row, 1, value=text)
+        c.fill = T_FILL; c.font = T_FONT; c.alignment = C; c.border = BDR
+        ws.row_dimensions[row].height = 26
+
+    def mk_hdr(ws, row, cols_list):
+        for ci, v in enumerate(cols_list, 1):
+            cell = ws.cell(row, ci, value=v)
+            cell.fill = H_FILL; cell.font = H_FONT; cell.alignment = C; cell.border = BDR
+        ws.row_dimensions[row].height = 22
+
+    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    wb  = openpyxl.Workbook()
+
+    # Sheet 1: Raw
+    ws1 = wb.active; ws1.title = 'Raw Data'
+    mk_title(ws1, 1, f'RAW DATA  |  {file_name}  |  {n_rows} records  |  {now_str}', len(num_cols)+1)
+    mk_hdr(ws1, 2, ['Row #'] + [col_labels.get(c,c) for c in num_cols])
+    for ri, rec in enumerate(records):
+        fill = ALT if ri%2==0 else PatternFill()
+        ws1.cell(ri+3,1,value=ri+1).alignment=C; ws1.cell(ri+3,1).border=BDR
+        for ci,col in enumerate(num_cols,2):
+            cell=ws1.cell(ri+3,ci,value=rec.get(col)); cell.border=BDR; cell.fill=fill; cell.alignment=R
+    ws1.freeze_panes='A3'
+
+    # Sheet 2: Cleaned
+    ws2 = wb.create_sheet('Cleaned Data')
+    mk_title(ws2, 1, 'CLEANED DATA — Mean Imputation + IQR Outlier Clamping', len(num_cols)+1)
+    mk_hdr(ws2, 2, ['Row #'] + [col_labels.get(c,c) for c in num_cols])
+    for ri in range(n_rows):
+        fill = ALT if ri%2==0 else PatternFill()
+        ws2.cell(ri+3,1,value=ri+1).alignment=C; ws2.cell(ri+3,1).border=BDR
+        for ci,col in enumerate(num_cols,2):
+            v = clamped[col][ri] if ri < len(clamped.get(col,[])) else ''
+            cell=ws2.cell(ri+3,ci,value=v); cell.border=BDR; cell.fill=fill; cell.alignment=R
+    ws2.freeze_panes='A3'
+
+    # Sheet 3: Normalised
+    ws3 = wb.create_sheet('Normalised 0-1')
+    mk_title(ws3, 1, 'MIN-MAX NORMALISED DATA (0 to 1)', len(num_cols)+1)
+    mk_hdr(ws3, 2, ['Row #'] + [col_labels.get(c,c) for c in num_cols])
+    for ri in range(n_rows):
+        fill = ALT if ri%2==0 else PatternFill()
+        ws3.cell(ri+3,1,value=ri+1).alignment=C; ws3.cell(ri+3,1).border=BDR
+        for ci,col in enumerate(num_cols,2):
+            v = normalized[col][ri] if ri < len(normalized.get(col,[])) else ''
+            cell=ws3.cell(ri+3,ci,value=v); cell.border=BDR; cell.fill=fill; cell.alignment=R
+            cell.number_format='0.000000'
+    ws3.freeze_panes='A3'
+
+    # Sheet 4: Z-Score
+    ws4 = wb.create_sheet('Z-Score Std')
+    mk_title(ws4, 1, 'Z-SCORE STANDARDISED DATA (mean=0, std=1)', len(num_cols)+1)
+    mk_hdr(ws4, 2, ['Row #'] + [col_labels.get(c,c) for c in num_cols])
+    for ri in range(n_rows):
+        fill = ALT if ri%2==0 else PatternFill()
+        ws4.cell(ri+3,1,value=ri+1).alignment=C; ws4.cell(ri+3,1).border=BDR
+        for ci,col in enumerate(num_cols,2):
+            v = standardized[col][ri] if ri < len(standardized.get(col,[])) else ''
+            cell=ws4.cell(ri+3,ci,value=v); cell.border=BDR; cell.fill=fill; cell.alignment=R
+            cell.number_format='0.000000'
+    ws4.freeze_panes='A3'
+
+    # Sheet 5: Statistics
+    ws5 = wb.create_sheet('Statistics')
+    mk_title(ws5, 1, 'DESCRIPTIVE STATISTICS — Before and After Cleaning', 11)
+    mk_hdr(ws5, 2, ['Column','Label','Total','Missing','Mean Raw','Mean Clean','Std Clean','Min Clean','Max Clean','Outliers','% Outliers'])
+    for ri, col in enumerate(num_cols, 3):
+        rs = raw_stats[col]; cs = clean_stats[col]
+        total = rs['count'] + rs['missing']; n_out = outlier_log.get(col,0)
+        pct_o = round(n_out/total*100,1) if total else 0
+        fill = ALT if ri%2==0 else PatternFill()
+        row_v = [col, col_labels.get(col,col), total, rs['missing'],
+                 rs['mean'] or 'N/A', cs['mean'] or 'N/A', cs['std'] or 'N/A',
+                 cs['min'] or 'N/A', cs['max'] or 'N/A', n_out, f'{pct_o}%']
+        for ci, v in enumerate(row_v, 1):
+            cell=ws5.cell(ri,ci,value=v); cell.border=BDR; cell.fill=fill
+            cell.alignment=C if ci!=2 else L; cell.font=Font(size=10,name='Arial')
+            if ci==4 and isinstance(v,int) and v>0: cell.fill=Y_FILL
+            if ci==10 and isinstance(v,int) and v>0: cell.fill=Y_FILL
+    ws5.freeze_panes='A3'
+
+    # Sheet 6: Model Input
+    ws6 = wb.create_sheet('Model Input Averaged')
+    mk_title(ws6, 1, 'AGGREGATED CLEAN VALUES — Representative Model Input', 3)
+    mk_hdr(ws6, 2, ['Column ID','Label','Avg Clean Value'])
+    for ri, col in enumerate(num_cols, 3):
+        fill = G_FILL if ri%2==0 else ALT
+        for ci, v in enumerate([col, col_labels.get(col,col), avg_clean.get(col,0)], 1):
+            cell=ws6.cell(ri,ci,value=v); cell.border=BDR; cell.fill=fill
+            cell.alignment=C if ci==3 else L; cell.font=Font(size=10,name='Arial',bold=(ci==3))
+
+    buf  = io.BytesIO()
+    wb.save(buf); buf.seek(0)
+    ts   = datetime.now().strftime('%Y%m%d_%H%M%S')
+    base = file_name.rsplit('.',1)[0] if file_name else pt
+    fname = f'{base}_preprocessed_{ts}.xlsx'
+    return Response(
+        buf.read(),
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        headers={
+            'Content-Disposition': f'attachment; filename={fname}',
+            'X-Avg-Params': json.dumps(avg_clean),
+            'X-Data-Type':  data_type,
+            'X-Row-Count':  str(n_rows),
+        }
+    )
+
 # NOTE: /api/run-matlab route has been removed.
 # This app is deployed as a web service — subprocess cannot launch
 # software on a client's machine from a remote server.
@@ -1193,7 +1962,6 @@ def export_mat():
     sel_out = d.get('selectedOutputs',[])
 
     # Build unique 3-char hex hash from input param values
-    import hashlib
     hash_input = ''.join(f'{k}={v}' for k, v in sorted(params.items()))
     hex_hash   = hashlib.md5(hash_input.encode()).hexdigest()[:3]
 
