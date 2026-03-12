@@ -1347,11 +1347,13 @@ def preprocess_file():
         fname_lower = orig_name.lower()
         file_bytes  = file.read()
 
-        # Consistent output filename: wwtp_{name}_{YYYYMMDD}_{HHMMSS}_{hash}.xlsx
-        _safe     = ''.join(c if c.isalnum() or c in ('_','-') else '_' for c in orig_name.rsplit('.',1)[0])
+        # Filename: wwtp_{plantType}_{YYYYMMDD}_{HHMMSS}_{hash}.xlsx
+        # Same pattern as MATLAB (.m) and Excel export (.xlsx)
+        pt_raw    = request.form.get('plantType', '') or orig_name.rsplit('.',1)[0]
+        _safe_pt  = ''.join(c for c in pt_raw if c.isalnum()).lower()
         _hxp      = hashlib.md5(file_bytes).hexdigest()[:3]
         _nwp      = datetime.now()
-        out_fname = f'wwtp_{_safe}_{_nwp.strftime("%Y%m%d")}_{_nwp.strftime("%H%M%S")}_{_hxp}.xlsx'
+        out_fname = f'wwtp_{_safe_pt}_{_nwp.strftime("%Y%m%d")}_{_nwp.strftime("%H%M%S")}_{_hxp}.xlsx'
 
         if not (fname_lower.endswith('.xlsx') or fname_lower.endswith('.xls') or fname_lower.endswith('.csv')):
             return jsonify({'success': False, 'error': 'Unsupported file format'}), 400
@@ -1470,6 +1472,7 @@ def preprocess_file():
             encoded = base64.b64encode(buf.read()).decode()
             return jsonify({'success': True, 'rows': len(records), 'active': active_cnt,
                             'sundays': sunday_cnt, 'columns': HEADERS,
+                            'data_type': 'stp_excel',
                             'file': encoded, 'filename': out_fname})
 
         # ══════════════════════════════════════════════════════════════════
@@ -1612,12 +1615,13 @@ def preprocess_file():
         wb.save(buf); buf.seek(0)
         encoded = base64.b64encode(buf.read()).decode()
         return jsonify({
-            'success':  True,
-            'rows':     total_rows,
-            'columns':  headers,
-            'outliers': outlier_counts,
-            'file':     encoded,
-            'filename': out_fname
+            'success':   True,
+            'rows':      total_rows,
+            'columns':   headers,
+            'outliers':  outlier_counts,
+            'data_type': 'scada_csv' if fname_lower.endswith('.csv') else 'generic',
+            'file':      encoded,
+            'filename':  out_fname
         })
 
     except Exception as e:
