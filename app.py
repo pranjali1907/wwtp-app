@@ -43,9 +43,15 @@ def add_cors(r):
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def serve(path):
-    if path and os.path.exists(os.path.join('static', path)):
-        return send_from_directory('static', path)
-    return send_from_directory('static', 'index.html')
+    static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
+    if not os.path.exists(static_dir):
+        return jsonify({'status': 'running', 'version': '4.0', 'note': 'static folder not found'}), 200
+    if path and os.path.exists(os.path.join(static_dir, path)):
+        return send_from_directory(static_dir, path)
+    index_path = os.path.join(static_dir, 'index.html')
+    if os.path.exists(index_path):
+        return send_from_directory(static_dir, 'index.html')
+    return jsonify({'status': 'running', 'version': '4.0'}), 200
 
 
 # ── FAST PREPROCESSING USING POLARS ─────────────────────────────
