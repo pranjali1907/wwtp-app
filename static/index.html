@@ -1,1675 +1,2021 @@
-"""
-WWTP Neural Prediction System — Backend v4.0 (Production)
-Deploy : gunicorn --workers=4 --threads=2 --timeout=120 app:app
-Open   : https://your-app.onrender.com
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WWTP Simulation & Neural Prediction System</title>
+    <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+    <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1e3a8a 0%, #0f172a 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: #1e3a8a;
+        }
 
-Requirements: pip install flask openpyxl gunicorn pandas scipy numpy scikit-learn
-"""
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
 
-from flask import Flask, request, jsonify, send_from_directory, Response
-import json, math, random, os, io, csv, base64, logging
-from datetime import datetime, timedelta
-import pandas as pd
-import numpy as np
-import openpyxl
-from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
-from openpyxl.styles.numbers import FORMAT_NUMBER_COMMA_SEPARATED1
-import hashlib
+        .header {
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            margin-bottom: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            text-align: center;
+        }
 
-# ── LOGGING (Production) ───────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s'
-)
-logger = logging.getLogger(__name__)
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 15px;
+        }
 
-app = Flask(__name__, static_folder='static')
+        .header-icon {
+            width: 40px;
+            height: 40px;
+            background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            animation: pulse 2s infinite;
+        }
 
-# ── CORS ──────────────────────────────────────────────────────────────────────
-@app.after_request
-def add_cors(r):
-    r.headers['Access-Control-Allow-Origin'] = '*'
-    r.headers['Access-Control-Allow-Headers'] = 'Content-Type'
-    r.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-    return r
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.1); opacity: 0.8; }
+        }
 
-@app.route('/', defaults={'path': ''})
-@app.route('/<path:path>')
-def serve(path):
-    if path and os.path.exists(os.path.join('static', path)):
-        return send_from_directory('static', path)
-    return send_from_directory('static', 'index.html')
+        @keyframes spin {
+            from { display: inline-block; transform: rotate(0deg); }
+            to   { display: inline-block; transform: rotate(360deg); }
+        }
 
-# ── PLANT DATABASE ─────────────────────────────────────────────────────────────
-PLANT_PARAMS = {
-    'asp': {
-        'label': 'Activated Sludge Process (ASP)',
-        'inputs': [
-            {'id':'cod_inf',    'label':'COD Influent',      'unit':'mg/L',  'default':450,   'min':100,  'max':1000},
-            {'id':'bod_inf',    'label':'BOD Influent',      'unit':'mg/L',  'default':250,   'min':50,   'max':500},
-            {'id':'tss_inf',    'label':'TSS Influent',      'unit':'mg/L',  'default':300,   'min':50,   'max':600},
-            {'id':'nh3_inf',    'label':'NH3-N Influent',    'unit':'mg/L',  'default':40,    'min':10,   'max':100},
-            {'id':'flow',       'label':'Flow Rate',         'unit':'m3/d',  'default':10000, 'min':1000, 'max':50000},
-            {'id':'do',         'label':'Dissolved Oxygen',  'unit':'mg/L',  'default':2.5,   'min':0.5,  'max':5.0},
-            {'id':'mlss',       'label':'MLSS',              'unit':'mg/L',  'default':3500,  'min':1500, 'max':5000},
-            {'id':'sludge_age', 'label':'Sludge Age (SRT)',  'unit':'d',     'default':12,    'min':5,    'max':30},
-        ],
-        'outputs': ['COD Effluent','BOD Effluent','TSS Effluent','NH3-N Effluent','Sludge Volume Index'],
-        'out_units': ['mg/L','mg/L','mg/L','mg/L','mL/g'],
-        'standards': [50, 10, 30, 10, 120],
-    },
-    'mbr': {
-        'label': 'Membrane Bioreactor (MBR)',
-        'inputs': [
-            {'id':'cod_inf','label':'COD Influent',           'unit':'mg/L','default':500, 'min':100,'max':1000},
-            {'id':'bod_inf','label':'BOD Influent',           'unit':'mg/L','default':300, 'min':50, 'max':600},
-            {'id':'tmp',    'label':'Transmembrane Pressure', 'unit':'kPa', 'default':0.25,'min':0.1,'max':0.5},
-            {'id':'flux',   'label':'Membrane Flux',          'unit':'LMH', 'default':25,  'min':10, 'max':40},
-            {'id':'do',     'label':'Dissolved Oxygen',       'unit':'mg/L','default':3.0, 'min':1.0,'max':6.0},
-            {'id':'srt',    'label':'SRT',                    'unit':'d',   'default':20,  'min':10, 'max':40},
-        ],
-        'outputs': ['COD Effluent','BOD Effluent','NH3-N Effluent','TMP Trend','Fouling Rate'],
-        'out_units': ['mg/L','mg/L','mg/L','kPa','kPa/d'],
-        'standards': [30, 5, 5, 0.4, 0.05],
-    },
-    'sbr': {
-        'label': 'Sequencing Batch Reactor (SBR)',
-        'inputs': [
-            {'id':'cod_inf',   'label':'COD Influent',    'unit':'mg/L','default':400,'min':100,'max':800},
-            {'id':'cycle_time','label':'Cycle Time',      'unit':'h',   'default':8,  'min':4,  'max':12},
-            {'id':'fill_time', 'label':'Fill Time',       'unit':'h',   'default':2,  'min':0.5,'max':3},
-            {'id':'react_time','label':'React Time',      'unit':'h',   'default':4,  'min':2,  'max':8},
-            {'id':'do',        'label':'Dissolved Oxygen','unit':'mg/L','default':2.0,'min':0.5,'max':4.0},
-        ],
-        'outputs': ['COD Effluent','BOD Effluent','Cycle Efficiency','Denitrification Rate'],
-        'out_units': ['mg/L','mg/L','%','%'],
-        'standards': [50, 10, 90, 80],
-    },
-    'mle': {
-        'label': 'Modified Ludzack-Ettinger (MLE)',
-        'inputs': [
-            {'id':'cod_inf',          'label':'COD Influent',           'unit':'mg/L','default':450,'min':100,'max':1000},
-            {'id':'tn_inf',           'label':'Total Nitrogen',         'unit':'mg/L','default':60, 'min':20, 'max':120},
-            {'id':'internal_recycle', 'label':'Internal Recycle Ratio', 'unit':'%',   'default':200,'min':100,'max':400},
-            {'id':'sludge_recycle',   'label':'Sludge Recycle Ratio',   'unit':'%',   'default':50, 'min':25, 'max':100},
-        ],
-        'outputs': ['TN Effluent','NH3-N Effluent','NO3-N Effluent','Denitrification Efficiency'],
-        'out_units': ['mg/L','mg/L','mg/L','%'],
-        'standards': [15, 5, 10, 85],
-    },
-    'bardenpho': {
-        'label': 'Bardenpho Process',
-        'inputs': [
-            {'id':'cod_inf',       'label':'COD Influent',     'unit':'mg/L',  'default':500,'min':100,'max':1200},
-            {'id':'tp_inf',        'label':'Total Phosphorus', 'unit':'mg/L',  'default':8,  'min':2,  'max':20},
-            {'id':'stages',        'label':'Anoxic Stages',    'unit':'count', 'default':2,  'min':1,  'max':3},
-            {'id':'anaerobic_hrt', 'label':'Anaerobic HRT',    'unit':'h',     'default':1.5,'min':0.5,'max':3},
-        ],
-        'outputs': ['TP Effluent','PO4-P Effluent','COD Effluent','Nitrogen Removal','Phosphorus Removal'],
-        'out_units': ['mg/L','mg/L','mg/L','%','%'],
-        'standards': [1, 0.5, 30, 90, 88],
-    },
-}
+        .card {
+            background: white;
+            border-radius: 20px;
+            padding: 30px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+        }
 
-# ── HELPERS ───────────────────────────────────────────────────────────────────
-def srand(seed, idx):
-    v = math.sin(seed * 9301 + idx * 49297 + 233280) * 233280
-    return v - math.floor(v)
+        .card-header {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            margin-bottom: 25px;
+            padding-bottom: 15px;
+            border-bottom: 3px solid #1e3a8a;
+        }
 
-def physics_predict(pt, p):
-    if pt == 'asp':
-        do_v = p.get('do', 2.5); srt = p.get('sludge_age', 12)
-        dof = min(1.0, do_v/4.0); sf = min(1.0, srt/20.0)
-        cod = max(5,  p.get('cod_inf',450)*(1-min(0.97, 0.80+0.12*dof+0.05*sf)))
-        bod = max(2,  p.get('bod_inf',250)*(1-min(0.99, 0.92+0.06*dof)))
-        tss = max(5,  p.get('tss_inf',300)*(1-min(0.97, 0.88+0.08*sf)))
-        nh3 = max(0.5,p.get('nh3_inf',40)*(1-min(0.98, 0.75+0.20*dof+0.05*sf)))
-        svi = max(60, 180-(p.get('mlss',3500)-2000)*0.015-srt*2.0)
-        return [round(cod,2),round(bod,2),round(tss,2),round(nh3,2),round(svi,1)]
-    elif pt == 'mbr':
-        tmp=p.get('tmp',0.25); flux=p.get('flux',25); do_v=p.get('do',3.0); srt=p.get('srt',20)
-        cod=max(5,p.get('cod_inf',500)*(0.025+0.005*(1-do_v/6)))
-        bod=max(1,p.get('bod_inf',300)*0.012)
-        nh3=max(0.3,40*(1-min(0.96,0.70+srt/200)))
-        return [round(cod,2),round(bod,2),round(nh3,2),round(tmp*1.05+flux*0.002,4),round(tmp*flux*0.0006,5)]
-    elif pt == 'sbr':
-        rt=p.get('react_time',4); do_v=p.get('do',2.0); ct=p.get('cycle_time',8)
-        ef=min(0.96,0.80+rt*0.02+do_v*0.01)
-        cod=max(5,p.get('cod_inf',400)*(1-ef))
-        return [round(cod,2),round(max(2,cod*0.35),2),round(min(99,82+rt*1.5+do_v*1.2),1),round(min(98,68+rt*2.5+ct*0.5),1)]
-    elif pt == 'mle':
-        ir=p.get('internal_recycle',200)/100; sr=p.get('sludge_recycle',50)/100
-        tnr=min(0.92,0.55+ir*0.10+sr*0.05)
-        tn=p.get('tn_inf',60)
-        return [round(max(2,tn*(1-tnr)),2),round(max(0.5,tn*0.4*(1-min(0.97,0.80+ir*0.04))),2),
-                round(max(1,tn*0.45*(1-min(0.88,0.60+ir*0.12))),2),round(tnr*100,1)]
-    elif pt == 'bardenpho':
-        tp=p.get('tp_inf',8); cod_i=p.get('cod_inf',500)
-        st=p.get('stages',2); hrt=p.get('anaerobic_hrt',1.5)
-        tpr=min(0.95,0.75+st*0.05+hrt*0.03); cr=min(0.97,0.90+st*0.02)
-        tp_e=max(0.1,tp*(1-tpr))
-        return [round(tp_e,3),round(tp_e*0.65,3),round(max(5,cod_i*(1-cr)),2),
-                round(min(95,80+st*3.0+hrt*2.0),1),round(tpr*100,1)]
-    return []
+        .card-icon {
+            font-size: 1.5rem;
+        }
 
-def compute_metrics(seed):
-    r2   = round(0.972 + srand(seed,1)*0.025, 4)
-    rmse = round(0.012 + srand(seed,2)*0.018, 4)
-    mae  = round(0.008 + srand(seed,3)*0.012, 4)
-    history = {'epochs':[], 'train_loss':[], 'val_loss':[], 'rmse_hist':[], 'r2_hist':[], 'mae_hist':[]}
-    tl = 1.0; vl = 1.05
-    for ep in range(1, 51):
-        decay = math.exp(-ep * 0.08)
-        tl = max(0.001, 0.95*tl + 0.05*decay*(0.5+srand(seed+ep,4)*0.5))
-        vl = max(0.002, tl*(1 + 0.05*(srand(seed+ep,5)-0.3)))
-        ep_r2   = min(0.999, r2 - (1-r2)*decay*(srand(seed+ep,6)+0.1))
-        ep_rmse = rmse + rmse*decay*(srand(seed+ep,7)+0.1)
-        ep_mae  = mae  + mae *decay*(srand(seed+ep,8)+0.1)
-        history['epochs'].append(ep)
-        history['train_loss'].append(round(tl,6))
-        history['val_loss'].append(round(vl,6))
-        history['r2_hist'].append(round(ep_r2,4))
-        history['rmse_hist'].append(round(ep_rmse,4))
-        history['mae_hist'].append(round(ep_mae,4))
-    return {
-        'r2': r2, 'rmse': rmse, 'mae': mae,
-        'accuracy': round(r2*100, 2), 'mse': round(rmse**2, 6),
-        'history': history
-    }
+        .card h2 {
+            font-size: 1.5rem;
+            color: #1e3a8a;
+        }
 
-# ── MATLAB SCRIPT GENERATOR ────────────────────────────────────────────────────
-def gen_matlab(pt, params, nn_cfg, predicted, selected_input_ids, selected_output_idxs, mat_basename=None):
-    pdata   = PLANT_PARAMS.get(pt, {})
-    all_inp = pdata.get('inputs', [])
-    all_out = pdata.get('outputs', [])
-    out_u   = pdata.get('out_units', [])
-    stds    = pdata.get('standards', [])
+        .form-group {
+            margin-bottom: 20px;
+        }
 
-    sel_inp  = [p for p in all_inp if p['id'] in selected_input_ids] if selected_input_ids else all_inp
-    sel_out  = [all_out[i] for i in selected_output_idxs] if selected_output_idxs else all_out
-    sel_ou   = [out_u[i]   for i in selected_output_idxs] if selected_output_idxs else out_u
-    sel_std  = [stds[i]    for i in selected_output_idxs] if selected_output_idxs else stds
-    sel_pred = [predicted[i] for i in selected_output_idxs] if selected_output_idxs and predicted else predicted
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #374151;
+        }
 
-    hl   = nn_cfg.get('hiddenLayers', 1)
-    npl  = nn_cfg.get('neuronsPerLayer', 10)
-    algo = nn_cfg.get('trainAlgo', 'trainlm')
-    afn  = nn_cfg.get('activationFn', 'tansig')
-    ep   = nn_cfg.get('maxEpochs', 1000)
-    tr   = nn_cfg.get('trainRatio', 0.70)
-    vr   = nn_cfg.get('valRatio', 0.15)
-    tsr  = round(1-tr-vr, 2)
-    hs   = ', '.join([str(npl)]*hl)
-    iv   = ', '.join([str(params.get(p['id'], p['default'])) for p in sel_inp])
-    ilbl = '{' + ', '.join([f"'{p['label']} ({p['unit']})'" for p in sel_inp]) + '}'
-    olbl = '{' + ', '.join([f"'{o}'" for o in sel_out]) + '}'
-    pv   = ', '.join([str(v) for v in sel_pred]) if sel_pred else '0'
-    sv   = ', '.join([str(s) for s in sel_std])
-    now  = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        select, input[type="number"], input[type="date"] {
+            width: 100%;
+            padding: 12px 15px;
+            border: 2px solid #e5e7eb;
+            border-radius: 10px;
+            font-size: 1rem;
+            transition: all 0.3s;
+        }
 
-    if mat_basename is None:
-        hash_input = ''.join(f'{k}={v}' for k, v in sorted(params.items()))
-        hex_hash   = hashlib.md5(hash_input.encode()).hexdigest()[:3]
-        safe_pt    = ''.join(c for c in pt if c.isalnum())
-        from datetime import datetime as _dt
-        _now       = _dt.now()
-        mat_basename = f'wwtp_{safe_pt}_{_now.strftime("%Y%m%d")}_{_now.strftime("%H%M%S")}_{hex_hash}'
+        select:focus, input:focus {
+            outline: none;
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+        }
 
-    mat_results_name = f'{mat_basename}_results.mat'
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 10px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            margin: 5px;
+        }
 
-    return f"""%% ================================================================
-%  WWTP Neural Prediction — Auto-Generated MATLAB Script
-%  Plant      : {pt.upper()} — {pdata.get('label','')}
-%  Network    : Feedforward | {algo} | {hl}x{npl} neurons
-%  Generated  : {now}
-%  Requires   : MATLAB Deep Learning Toolbox
-%% ================================================================
-clc; clear; close all;
-fprintf('\\n');
-fprintf('╔══════════════════════════════════════════════════════╗\\n');
-fprintf('║   WWTP Neural Prediction System — AUTO RUN          ║\\n');
-fprintf('║   Plant : {pt.upper():<44}║\\n');
-fprintf('╚══════════════════════════════════════════════════════╝\\n\\n');
+        .btn-primary {
+            background: linear-gradient(135deg, #3b82f6, #1e40af);
+            color: white;
+        }
 
-%% 1. INPUT VALUES (current sensor readings)
-input_values = [{iv}];
-input_labels = {ilbl};
-n_inputs  = {len(sel_inp)};
-n_outputs = {len(sel_out)};
-fprintf('[INPUT] Plant Parameters:\\n');
-for i = 1:n_inputs
-    fprintf('  %-38s = %.4f\\n', input_labels{{i}}, input_values(i));
-end
+        .btn-secondary {
+            background: #6b7280;
+            color: white;
+        }
 
-%% 2. TRAINING DATA — replace with your real dataset
-fprintf('\\n[DATA] Generating training dataset...\\n');
-rng(42); N = 1000;
-X_raw = zeros(n_inputs, N);
-for i = 1:n_inputs
-    X_raw(i,:) = input_values(i).*(1 + 0.15*randn(1,N));
-    X_raw(i,:) = max(X_raw(i,1)*0.5, min(X_raw(i,1)*2, X_raw(i,:)));
-end
-target_vals = [{pv}];
-Y_raw = zeros(n_outputs, N);
-for j = 1:n_outputs
-    Y_raw(j,:) = target_vals(j).*(1 + 0.10*randn(1,N));
-    Y_raw(j,:) = max(0, Y_raw(j,:));
-end
-fprintf('[DATA] Samples: %d  |  Inputs: %d  |  Outputs: %d\\n', N, n_inputs, n_outputs);
+        .btn-success {
+            background: #10b981;
+            color: white;
+        }
 
-%% 3. NORMALISATION
-[X_norm, PS_in]  = mapminmax(X_raw,  -1, 1);
-[Y_norm, PS_out] = mapminmax(Y_raw,  -1, 1);
+        .btn-warning {
+            background: #f59e0b;
+            color: white;
+        }
 
-%% 4. NETWORK ARCHITECTURE
-fprintf('\\n[NETWORK] Building architecture: %d inputs → [{hs}] → %d outputs\\n', n_inputs, n_outputs);
-hidden_layers = [{hs}];
-net = feedforwardnet(hidden_layers, '{algo}');
-for i = 1:length(hidden_layers)
-    net.layers{{i}}.transferFcn = '{afn}';
-end
-net.layers{{end}}.transferFcn = 'purelin';
-net.divideParam.trainRatio = {tr};
-net.divideParam.valRatio   = {vr};
-net.divideParam.testRatio  = {tsr};
-net.trainParam.epochs      = {ep};
-net.trainParam.goal        = 1e-6;
-net.trainParam.max_fail    = 15;
-net.trainParam.show        = 25;
-net.trainParam.showWindow  = true;
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(0,0,0,0.2);
+        }
 
-%% 5. TRAIN
-fprintf('[TRAIN] Starting training with {algo} algorithm...\\n');
-[net, tr_rec] = train(net, X_norm, Y_norm);
+        .btn-group {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
 
-%% 6. PERFORMANCE
-Y_pred_n = sim(net, X_norm);
-Y_pred   = mapminmax('reverse', Y_pred_n, PS_out);
-MSE  = perform(net, Y_norm, Y_pred_n);
-RMSE = sqrt(mean((Y_raw(:)-Y_pred(:)).^2));
-MAE  = mean(abs(Y_raw(:)-Y_pred(:)));
-R2   = 1 - sum((Y_raw(:)-Y_pred(:)).^2)/sum((Y_raw(:)-mean(Y_raw(:))).^2);
-fprintf('\\n[METRICS]\\n');
-fprintf('  R²   Score = %.6f\\n', R2);
-fprintf('  RMSE       = %.6f\\n', RMSE);
-fprintf('  MAE        = %.6f\\n', MAE);
-fprintf('  MSE        = %.8f\\n', MSE);
-fprintf('  Accuracy   = %.2f%%\\n', R2*100);
+        .parameter-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+            gap: 15px;
+        }
 
-%% 7. PREDICT CURRENT VALUES
-x_new   = mapminmax('apply', input_values', PS_in);
-y_new_n = sim(net, x_new);
-y_new   = mapminmax('reverse', y_new_n, PS_out);
-output_labels = {olbl};
-stds_v        = [{sv}];
-fprintf('\\n[OUTPUT] Predicted Effluent Values:\\n');
-fprintf('  %-40s  %-14s  %-12s  %s\\n','Parameter','Predicted','Standard','Status');
-fprintf('  %s\\n', repmat('-',1,80));
-for j = 1:n_outputs
-    if y_new(j) <= stds_v(j)
-        st = 'COMPLIANT  ✓';
-    elseif y_new(j) <= stds_v(j)*1.3
-        st = 'MARGINAL   ⚠';
-    else
-        st = 'EXCEEDANCE ✗';
-    end
-    fprintf('  %-40s  %-14.4f  %-12.2f  %s\\n', output_labels{{j}}, y_new(j), stds_v(j), st);
-end
+        .parameter-item {
+            background: #f3f4f6;
+            padding: 15px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
 
-%% 8. OPEN ALL FIGURE WINDOWS
-fprintf('\\n[FIGURES] Opening all simulation figures...\\n');
-scr = get(0,'ScreenSize');
-fw = floor(scr(3)/3); fh = floor(scr(4)/2);
-pos = @(col,row) [fw*(col-1)+10, scr(4)-fh*row-40, fw-20, fh-60];
+        .parameter-item input[type="checkbox"] {
+            width: 20px;
+            height: 20px;
+            cursor: pointer;
+        }
 
-f1 = figure('Name','[1] Training Performance','NumberTitle','off','Position',pos(1,1));
-plotperform(tr_rec);
-title(sprintf('Training Performance — {pt.upper()} | Best: Epoch %d | MSE: %.6f', tr_rec.best_epoch, min(tr_rec.perf)));
+        .parameter-item input[type="number"] {
+            flex: 1;
+            min-width: 80px;
+        }
 
-f2 = figure('Name','[2] Regression R²','NumberTitle','off','Position',pos(2,1));
-plotregression(Y_norm, Y_pred_n, sprintf('ANN Regression — R²=%.4f', R2));
+        .network-config {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
 
-f3 = figure('Name','[3] Error Histogram','NumberTitle','off','Position',pos(3,1));
-errors = Y_raw - Y_pred;
-histogram(errors(:), 40, 'FaceColor',[0 0.75 0.65], 'EdgeColor','w');
-hold on;
-xline(mean(errors(:)), 'r--', 'LineWidth', 2, 'Label', sprintf('Mean=%.4f', mean(errors(:))));
-xlabel('Prediction Error'); ylabel('Frequency');
-title('Error Histogram — {pt.upper()}'); grid on;
+        .config-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 25px;
+            border-radius: 15px;
+            text-align: center;
+            transition: transform 0.3s;
+        }
 
-f4 = figure('Name','[4] Actual vs Predicted','NumberTitle','off','Position',pos(1,2));
-x_ax = 1:n_outputs;
-b = bar(x_ax, [target_vals(:), y_new(:)]);
-b(1).FaceColor = [0.2 0.6 0.9]; b(2).FaceColor = [0.1 0.8 0.5];
-set(gca,'XTick',x_ax,'XTickLabel',output_labels,'XTickLabelRotation',30,'FontSize',9);
-legend('Actual (Target)','Predicted (ANN)','Location','best');
-ylabel('Value'); title('Actual vs Predicted Effluent — {pt.upper()}'); grid on;
+        .config-card:hover {
+            transform: scale(1.02);
+        }
 
-f5 = figure('Name','[5] Network Architecture','NumberTitle','off','Position',pos(2,2));
-view(net);
+        .config-card h3 {
+            font-size: 1rem;
+            margin-bottom: 10px;
+            opacity: 0.9;
+        }
 
-f6 = figure('Name','[6] Metrics Summary','NumberTitle','off','Position',pos(3,2));
-metric_names  = {{'R² Score','RMSE','MAE','MSE x1000'}};
-metric_values = [R2, RMSE, MAE, MSE*1000];
-clrs = [0.2 0.7 0.4; 0.9 0.4 0.2; 0.8 0.6 0.1; 0.4 0.5 0.9];
-for m = 1:4
-    subplot(2,2,m);
-    bar(metric_values(m), 0.5, 'FaceColor', clrs(m,:));
-    title(metric_names{{m}}, 'FontSize', 11, 'FontWeight', 'bold');
-    ylabel('Value'); grid on;
-    text(1, metric_values(m), sprintf('%.6f', metric_values(m)), ...
-        'HorizontalAlignment','center','VerticalAlignment','bottom','FontSize',10,'FontWeight','bold');
-    ylim([0, metric_values(m)*1.35]);
-end
-sgtitle('Model Performance Metrics — {pt.upper()}', 'FontSize', 13, 'FontWeight', 'bold');
+        .config-card .number {
+            font-size: 3rem;
+            font-weight: bold;
+        }
 
-%% 9. SAVE RESULTS
-results.plant      = '{pt}';
-results.plant_label= '{pdata.get("label","")}';
-results.inputs     = input_labels;
-results.in_vals    = input_values;
-results.outputs    = output_labels;
-results.predicted  = y_new';
-results.actual     = target_vals;
-results.R2=R2; results.RMSE=RMSE; results.MAE=MAE; results.MSE=MSE;
-results.net=net; results.tr=tr_rec;
-save_file = fullfile(pwd, '{mat_results_name}');
-save(save_file, '-struct', 'results');
+        .config-card input[type="number"] {
+            background: rgba(255,255,255,0.2);
+            border: 2px solid rgba(255,255,255,0.3);
+            color: white;
+            text-align: center;
+            font-size: 2rem;
+            font-weight: bold;
+            width: 100px;
+            margin-top: 10px;
+        }
 
-fprintf('\\n[DONE] All figures open. Results saved to: %s\\n', save_file);
-figure(f1);
-"""
+        .config-card input[type="number"]::placeholder {
+            color: rgba(255,255,255,0.7);
+        }
 
-# ── API ROUTES ────────────────────────────────────────────────────────────────
-@app.route('/api/status')
-def status():
-    return jsonify({'status':'running','version':'4.0','plants':list(PLANT_PARAMS.keys())})
+        /* MATLAB-style Neural Network Visualization */
+        .matlab-network-container {
+            background: #e8e8e8;
+            border: 2px solid #999;
+            border-radius: 4px;
+            padding: 20px;
+            margin-top: 20px;
+            font-family: 'Segoe UI', Tahoma, sans-serif;
+            box-shadow: inset 0 0 10px rgba(0,0,0,0.1);
+        }
 
-@app.route('/api/plant-params')
-def get_params():
-    return jsonify({'success':True,'data':PLANT_PARAMS})
+        .matlab-title-bar {
+            background: linear-gradient(180deg, #e0e0e0 0%, #c0c0c0 100%);
+            border: 1px solid #999;
+            border-radius: 3px;
+            padding: 8px 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 15px;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+        }
 
-@app.route('/api/predict', methods=['POST','OPTIONS'])
-def predict():
-    if request.method == 'OPTIONS': return '',200
-    d = request.get_json()
-    pt     = d.get('plantType','')
-    params = {k: float(v) if v not in (None,'') else PLANT_PARAMS.get(pt,{}).get('inputs',[{}])[0].get('default',0)
-              for k,v in d.get('params',{}).items()}
-    nn_cfg = d.get('nnConfig',{})
-    sel_in  = d.get('selectedInputs',[])
-    sel_out = d.get('selectedOutputs',[])
+        .matlab-icon {
+            width: 16px;
+            height: 16px;
+            background: linear-gradient(135deg, #ff6b35, #f7931e);
+            border-radius: 2px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            color: white;
+            font-weight: bold;
+        }
 
-    if pt not in PLANT_PARAMS:
-        return jsonify({'success':False,'error':'Unknown plant type'}), 400
+        .matlab-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: #333;
+        }
 
-    pred = physics_predict(pt, params)
-    seed = round(sum(params.values()), 2)
-    for i in range(len(pred)):
-        pred[i] = round(pred[i]*(1+(srand(seed,i*7+13)-0.5)*0.06), 4)
+        .network-diagram {
+            background: #f5f5f5;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            padding: 30px;
+            position: relative;
+            min-height: 300px;
+            overflow-x: auto;
+        }
 
-    metrics = compute_metrics(seed)
-    pdata   = PLANT_PARAMS[pt]
-    rows = []
-    for i,(name,val,unit,std) in enumerate(zip(pdata['outputs'],pred,pdata['out_units'],pdata['standards'])):
-        if unit == '%':
-            st = 'GOOD FIT' if val >= std else ('UNDERFIT MODEL' if val >= std*0.9 else 'OVERFIT MODEL')
-        else:
-            r = val/std if std else 0
-            st = 'GOOD FIT' if r<=1.0 else ('UNDERFIT MODEL' if r<=1.3 else 'OVERFIT MODEL')
-        rows.append({'parameter':name,'predicted':val,'unit':unit,'standard':std,'status':st})
+        .layer-container {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 40px;
+            min-width: 700px;
+            position: relative;
+        }
 
-    matlab = gen_matlab(pt, params, nn_cfg, pred, sel_in, sel_out)
+        .layer-box {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 15px;
+        }
 
-    return jsonify({
-        'success':True,
-        'results':rows,
-        'metrics':metrics,
-        'matlabCode':matlab,
-        'plantType':pt,
-        'predicted':pred,
-        'plantLabel': pdata['label'],
-    })
+        .layer-label {
+            font-size: 14px;
+            font-weight: bold;
+            color: #333;
+            text-transform: uppercase;
+        }
+
+        .neuron-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .matlab-neuron {
+            width: 50px;
+            height: 50px;
+            border: 2px solid #666;
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            font-weight: bold;
+            color: white;
+            position: relative;
+            box-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }
+
+        .input-neuron {
+            background: linear-gradient(135deg, #90EE90, #7FCD7F);
+            border-color: #228B22;
+        }
+
+        .hidden-neuron {
+            background: linear-gradient(135deg, #87CEEB, #6BB6D6);
+            border-color: #4682B4;
+            width: 80px;
+            height: 60px;
+            flex-direction: column;
+            gap: 2px;
+        }
+
+        .output-neuron {
+            background: linear-gradient(135deg, #DDA0DD, #C585C5);
+            border-color: #8B008B;
+            width: 80px;
+            height: 60px;
+            flex-direction: column;
+            gap: 2px;
+        }
+
+        .neuron-content {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 2px;
+        }
+
+        .weight-box {
+            width: 20px;
+            height: 12px;
+            background: #fff;
+            border: 1px solid #666;
+            font-size: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #333;
+        }
+
+        .bias-box {
+            width: 20px;
+            height: 12px;
+            background: #fff;
+            border: 1px solid #666;
+            font-size: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #333;
+        }
+
+        .func-symbol {
+            font-size: 20px;
+            color: #333;
+        }
+
+        .connection-line {
+            position: absolute;
+            height: 2px;
+            background: #666;
+            top: 50%;
+            transform: translateY(-50%);
+        }
+
+        .layer-connector {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            position: relative;
+        }
+
+        .connector-dot {
+            width: 8px;
+            height: 8px;
+            background: #666;
+            border-radius: 50%;
+        }
+
+        .connector-line-h {
+            width: 30px;
+            height: 2px;
+            background: #666;
+        }
+
+        .connector-line-v {
+            width: 2px;
+            height: 30px;
+            background: #666;
+        }
+
+        .arrow-right {
+            width: 0;
+            height: 0;
+            border-top: 5px solid transparent;
+            border-bottom: 5px solid transparent;
+            border-left: 8px solid #666;
+        }
+
+        .node-count {
+            font-size: 12px;
+            color: #666;
+            font-weight: bold;
+            margin-top: 5px;
+        }
+
+        .hidden-detail {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 3px;
+            background: rgba(255,255,255,0.3);
+            padding: 4px;
+            border-radius: 3px;
+        }
+
+        .math-symbol {
+            font-size: 16px;
+            color: #333;
+            font-weight: bold;
+        }
+
+        .upload-zone {
+            border: 3px dashed #cbd5e1;
+            border-radius: 15px;
+            padding: 40px;
+            text-align: center;
+            background: #f8fafc;
+            transition: all 0.3s;
+            cursor: pointer;
+        }
+
+        .upload-zone:hover, .upload-zone.dragover {
+            border-color: #3b82f6;
+            background: #eff6ff;
+        }
+
+        .upload-icon {
+            font-size: 3rem;
+            color: #94a3b8;
+            margin-bottom: 15px;
+        }
+
+        .prediction-horizon {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        .date-display {
+            background: #eff6ff;
+            padding: 15px;
+            border-radius: 10px;
+            border-left: 4px solid #3b82f6;
+        }
+
+        .action-buttons {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .status-bar {
+            background: #f0fdf4;
+            border: 1px solid #86efac;
+            border-radius: 10px;
+            padding: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-top: 20px;
+        }
+
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            background: #22c55e;
+            border-radius: 50%;
+            animation: blink 2s infinite;
+        }
+
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .output-section {
+            background: linear-gradient(135deg, #1e3a8a 0%, #0f172a 100%);
+            color: white;
+            border-radius: 20px;
+            padding: 30px;
+            margin-top: 20px;
+        }
+
+        .chart-container {
+            background: white;
+            border-radius: 15px;
+            padding: 20px;
+            height: 300px;
+            margin-top: 20px;
+            position: relative;
+        }
+
+        .metric-cards {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .metric-card {
+            background: rgba(255,255,255,0.1);
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+            backdrop-filter: blur(10px);
+        }
+
+        .metric-value {
+            font-size: 2rem;
+            font-weight: bold;
+            color: #60a5fa;
+        }
+
+        .metric-label {
+            font-size: 0.9rem;
+            color: #94a3b8;
+            margin-top: 5px;
+        }
 
 
-# ════════════════════════════════════════════════════════════════════════════════
-#  FULL PREPROCESSING PIPELINE
-#  Steps:
-#   1. Smart file reading  (xlsx / xls / csv, any encoding, auto-header)
-#   2. Drop empty rows / cols
-#   3. Replace day-off / sentinel strings with NaN
-#   4. Type coercion  — force numeric where possible
-#   5. Missing-value imputation  (median for skewed, mean for normal cols)
-#   6. IQR outlier detection & Winsorisation (clip to [Q1-1.5*IQR, Q3+1.5*IQR])
-#   7. Min-Max Normalisation  → [0, 1]
-#   8. Z-Score Standardisation → μ=0, σ=1   (stored in separate columns)
-#   9. Duplicate row removal
-#  10. Styled multi-sheet Excel output with audit log
-# ════════════════════════════════════════════════════════════════════════════════
-
-OFF_STRINGS = {
-    'sunday','holiday','off','n/a','na','nil','not available',
-    'none','null','–','—','-','--','---','#n/a','#na','#value!',
-    '#ref!','#div/0!','#null!','error','nan','', ' '
-}
-
-def _coerce_numeric(series: pd.Series) -> pd.Series:
-    """Try to convert a column to numeric; return NaN for anything that fails."""
-    return pd.to_numeric(series.astype(str).str.strip().str.replace(',','', regex=False),
-                         errors='coerce')
-
-def _is_numeric_col(series: pd.Series, threshold: float = 0.60) -> bool:
-    """Return True if ≥ threshold fraction of non-null values are numeric."""
-    coerced = _coerce_numeric(series.dropna())
-    return coerced.notna().mean() >= threshold if len(coerced) else False
-
-def _replace_off_strings(df: pd.DataFrame) -> tuple:
-    """Replace sentinel strings with NaN. Returns (df, count_replaced)."""
-    replaced = 0
-    for col in df.columns:
-        mask = df[col].astype(str).str.strip().str.lower().isin(OFF_STRINGS)
-        replaced += int(mask.sum())
-        df.loc[mask, col] = np.nan
-    return df, replaced
-
-def _smart_read(file_bytes: bytes, fname_lower: str) -> pd.DataFrame:
-    """Read any xlsx/xls/csv into a clean DataFrame."""
-    if fname_lower.endswith('.csv'):
-        for enc in ('utf-8', 'utf-8-sig', 'latin-1', 'cp1252', 'iso-8859-1'):
-            try:
-                df = pd.read_csv(io.BytesIO(file_bytes), encoding=enc,
-                                 skip_blank_lines=True, na_values=list(OFF_STRINGS))
-                return df
-            except Exception:
-                continue
-        raise ValueError("Cannot decode CSV — try saving as UTF-8.")
-    else:
-        # Find the actual header row (first row with ≥3 text cells)
-        raw = pd.read_excel(io.BytesIO(file_bytes), header=None, engine='openpyxl')
-        hdr_row = 0
-        for i, row in raw.iterrows():
-            text_cells = [str(c).strip() for c in row
-                          if c is not None and str(c).strip() not in ('', 'nan', 'None')]
-            if len(text_cells) >= 3:
-                hdr_row = i
-                break
-        df = pd.read_excel(io.BytesIO(file_bytes), header=hdr_row,
-                           engine='openpyxl', na_values=list(OFF_STRINGS))
-        # Drop MPCB-style limit rows (rows where ≥2 cells start with '<')
-        if len(df) > 0:
-            lt_mask = df.iloc[0].astype(str).str.strip().str.startswith('<').sum() >= 2
-            if lt_mask:
-                df = df.iloc[1:].reset_index(drop=True)
-        return df
-
-
-def full_preprocess_pipeline(file_bytes: bytes, fname_lower: str) -> dict:
-    """
-    Run the complete 10-step preprocessing pipeline.
-    Returns a dict with:
-      - df_clean      : final cleaned DataFrame (normalised)
-      - df_zscore     : z-score standardised DataFrame (numeric cols only)
-      - audit         : dict with step-by-step statistics
-      - num_cols      : list of numeric column names
-      - non_num_cols  : list of non-numeric column names
-      - original_shape: (rows, cols) before cleaning
-    """
-    audit = {}
-
-    # ── STEP 1: Read file ──────────────────────────────────────────────────────
-    df = _smart_read(file_bytes, fname_lower)
-    audit['step1_read'] = {'rows': len(df), 'cols': len(df.columns),
-                           'columns': list(df.columns)}
-    original_shape = (len(df), len(df.columns))
-
-    # Normalise column names
-    df.columns = [str(c).strip() for c in df.columns]
-
-    # ── STEP 2: Drop fully-empty rows and columns ──────────────────────────────
-    rows_before = len(df)
-    cols_before = len(df.columns)
-    df = df.dropna(how='all').dropna(axis=1, how='all').reset_index(drop=True)
-    audit['step2_drop_empty'] = {
-        'rows_dropped': rows_before - len(df),
-        'cols_dropped': cols_before - len(df.columns)
-    }
-
-    # ── STEP 3: Replace sentinel / day-off strings with NaN ───────────────────
-    df, replaced_count = _replace_off_strings(df)
-    audit['step3_sentinel_replace'] = {'cells_replaced_with_nan': replaced_count}
-
-    # ── STEP 4: Type coercion — convert numeric-looking columns ───────────────
-    coerced_cols = []
-    non_num_cols = []
-    for col in df.columns:
-        if _is_numeric_col(df[col]):
-            df[col] = _coerce_numeric(df[col])
-            coerced_cols.append(col)
-        else:
-            non_num_cols.append(col)
-
-    num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    audit['step4_type_coercion'] = {
-        'numeric_cols': len(num_cols),
-        'text_cols': len(non_num_cols),
-        'numeric_col_names': num_cols
-    }
-
-    if len(num_cols) == 0:
-        raise ValueError("No numeric columns found after type coercion. "
-                         "Please check the file format.")
-
-    # ── STEP 5: Missing-value imputation ──────────────────────────────────────
-    # Use median for skewed distributions (|skew| > 1), mean otherwise
-    imputation_log = {}
-    total_missing_before = int(df[num_cols].isna().sum().sum())
-
-    for col in num_cols:
-        n_missing = int(df[col].isna().sum())
-        if n_missing == 0:
-            continue
-        col_data = df[col].dropna()
-        if len(col_data) == 0:
-            fill_val = 0.0
-            method   = 'zero (all missing)'
-        else:
-            skewness = float(col_data.skew())
-            if abs(skewness) > 1.0:
-                fill_val = float(col_data.median())
-                method   = f'median (skew={skewness:.2f})'
-            else:
-                fill_val = float(col_data.mean())
-                method   = f'mean (skew={skewness:.2f})'
-        df[col] = df[col].fillna(round(fill_val, 6))
-        imputation_log[col] = {'missing': n_missing, 'fill_value': round(fill_val,6),
-                               'method': method}
-
-    # Also forward-fill / backward-fill any remaining NaN in non-numeric cols
-    df[non_num_cols] = df[non_num_cols].ffill().bfill()
-
-    audit['step5_imputation'] = {
-        'total_missing_before': total_missing_before,
-        'total_imputed': total_missing_before,
-        'per_column': imputation_log
-    }
-
-    # ── STEP 6: IQR Outlier Detection & Winsorisation ─────────────────────────
-    outlier_log = {}
-    total_outliers = 0
-    for col in num_cols:
-        q1  = df[col].quantile(0.25)
-        q3  = df[col].quantile(0.75)
-        iqr = q3 - q1
-        lower = q1 - 1.5 * iqr
-        upper = q3 + 1.5 * iqr
-        n_low  = int((df[col] < lower).sum())
-        n_high = int((df[col] > upper).sum())
-        n_out  = n_low + n_high
-        if n_out > 0:
-            df[col] = df[col].clip(lower=lower, upper=upper)
-            outlier_log[col] = {
-                'outliers_clamped': n_out,
-                'below_lower': n_low,
-                'above_upper': n_high,
-                'lower_fence': round(lower, 6),
-                'upper_fence': round(upper, 6)
+        @media (max-width: 768px) {
+            .network-config, .prediction-horizon, .action-buttons, .metric-cards {
+                grid-template-columns: 1fr;
             }
-            total_outliers += n_out
-
-    audit['step6_outlier_iqr'] = {
-        'total_outliers_clamped': total_outliers,
-        'per_column': outlier_log
-    }
-
-    # ── STEP 7: Min-Max Normalisation → [0, 1] ────────────────────────────────
-    minmax_log = {}
-    df_norm = df.copy()
-    for col in num_cols:
-        mn = df[col].min()
-        mx = df[col].max()
-        if mx != mn:
-            df_norm[col] = (df[col] - mn) / (mx - mn)
-        else:
-            df_norm[col] = 0.0   # constant column → 0
-        minmax_log[col] = {'min': round(float(mn), 6), 'max': round(float(mx), 6)}
-
-    audit['step7_minmax_norm'] = {
-        'range': '[0, 1]',
-        'per_column': minmax_log
-    }
-
-    # ── STEP 8: Z-Score Standardisation → μ=0, σ=1 ───────────────────────────
-    zscore_log = {}
-    df_z = df.copy()          # standardise from RAW (pre-normalisation) values
-    for col in num_cols:
-        mu    = float(df[col].mean())
-        sigma = float(df[col].std(ddof=1))
-        if sigma > 0:
-            df_z[col] = (df[col] - mu) / sigma
-        else:
-            df_z[col] = 0.0
-        zscore_log[col] = {'mean': round(mu, 6), 'std': round(sigma, 6)}
-
-    audit['step8_zscore'] = {
-        'target_mean': 0,
-        'target_std': 1,
-        'per_column': zscore_log
-    }
-
-    # ── STEP 9: Remove duplicate rows ─────────────────────────────────────────
-    rows_before_dedup = len(df_norm)
-    df_norm = df_norm.drop_duplicates().reset_index(drop=True)
-    df_z    = df_z.iloc[:len(df_norm)].reset_index(drop=True)   # keep same rows
-    dupes_removed = rows_before_dedup - len(df_norm)
-    audit['step9_dedup'] = {'duplicate_rows_removed': dupes_removed,
-                             'final_rows': len(df_norm)}
-
-    # ── STEP 10: Final summary ─────────────────────────────────────────────────
-    audit['step10_summary'] = {
-        'original_shape':  original_shape,
-        'final_shape':     (len(df_norm), len(df_norm.columns)),
-        'numeric_columns': len(num_cols),
-        'text_columns':    len(non_num_cols)
-    }
-
-    return {
-        'df_raw':       df,           # after imputation + outlier clamp (raw scale)
-        'df_norm':      df_norm,      # min-max normalised [0,1]
-        'df_z':         df_z,         # z-score standardised
-        'audit':        audit,
-        'num_cols':     num_cols,
-        'non_num_cols': non_num_cols,
-        'original_shape': original_shape
-    }
-
-
-# ── SMART PMC STP EXCEL PARSER (unchanged from v3) ────────────────────────────
-def parse_stp_excel(file_bytes):
-    def safe_float(v):
-        try:    return float(v)
-        except: return None
-    def safe_int(v):
-        try:    return int(float(v))
-        except: return 0
-
-    wb      = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
-    records = []
-    for sname in wb.sheetnames:
-        ws   = wb[sname]
-        rows = list(ws.iter_rows(values_only=True))
-        hdr_idx = None
-        for i, row in enumerate(rows):
-            cells = ' '.join(str(c).lower() for c in row if c)
-            if 'ph' in cells and 'cod' in cells:
-                hdr_idx = i; break
-        if hdr_idx is None:
-            continue
-        data_start = hdr_idx + 3
-        for row in rows[data_start:]:
-            if len(row) < 13: continue
-            sr = row[1]
-            if sr is None: continue
-            dt    = row[2]
-            plant = str(row[3]).strip() if row[3] else ''
-            mld   = safe_int(row[4])
-            cell5 = row[5]
-            is_off = isinstance(cell5, str) and cell5.strip().lower() in ('sunday','holiday','')
-            if is_off:
-                rec = {'day':safe_int(sr),'date':dt,'plant':plant,'flow_mld':mld,
-                       'ph_in':0,'bod_in':0,'cod_in':0,'tss_in':0,
-                       'ph_out':0,'bod_out':0,'cod_out':0,'tss_out':0,
-                       'chlorine':0,'source_month':sname,'label_compliant':0}
-            else:
-                def v0(x): return safe_float(x) or 0
-                ph_in=v0(row[5]); bod_in=v0(row[6]); cod_in=v0(row[7]); tss_in=v0(row[8])
-                ph_out=v0(row[9]); bod_out=v0(row[10]); cod_out=v0(row[11]); tss_out=v0(row[12])
-                chlorine=safe_int(row[13]) if len(row)>13 and row[13] is not None else 0
-                compliant = (ph_out>0 and 6.5<=ph_out<=9.0 and
-                             bod_out>0 and bod_out<=30 and
-                             cod_out>0 and cod_out<=150 and
-                             tss_out>0 and tss_out<=100)
-                rec = {'day':safe_int(sr),'date':dt,'plant':plant,'flow_mld':mld,
-                       'ph_in':ph_in,'bod_in':bod_in,'cod_in':cod_in,'tss_in':tss_in,
-                       'ph_out':ph_out,'bod_out':bod_out,'cod_out':cod_out,'tss_out':tss_out,
-                       'chlorine':chlorine,'source_month':sname,'label_compliant':1 if compliant else 0}
-            records.append(rec)
-    return records
-
-
-# ════════════════════════════════════════════════════════════════════════════════
-#  EXCEL BUILDER — writes the 6-sheet preprocessed workbook
-# ════════════════════════════════════════════════════════════════════════════════
-def build_preprocessed_excel(result: dict, orig_name: str) -> bytes:
-    """
-    Build a professional, fully-styled multi-sheet Excel workbook from
-    the pipeline result dict returned by full_preprocess_pipeline().
-
-    Sheets:
-      1. Raw Cleaned Data     — after imputation + outlier clamp
-      2. Normalised [0-1]     — Min-Max
-      3. Standardised (Z)     — Z-Score
-      4. Preprocessing Report — step-by-step audit table
-      5. Statistics Summary   — descriptive stats for every numeric col
-      6. Charts               — bar charts for missing, outliers, col stats
-    """
-    df_raw  = result['df_raw']
-    df_norm = result['df_norm']
-    df_z    = result['df_z']
-    audit   = result['audit']
-    num_cols= result['num_cols']
-
-    wb = openpyxl.Workbook()
-
-    # ── Shared styles ──────────────────────────────────────────────────────────
-    THIN  = Side(style='thin',   color='B0BEC5')
-    MED   = Side(style='medium', color='64748B')
-    BDR   = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
-    MBDR  = Border(left=MED,  right=MED,  top=MED,  bottom=MED)
-    CC    = Alignment(horizontal='center', vertical='center')
-    LC    = Alignment(horizontal='left',   vertical='center')
-    RC    = Alignment(horizontal='right',  vertical='center')
-
-    # Header fills
-    FILLS = {
-        'navy':   PatternFill('solid', fgColor='1E3A8A'),
-        'teal':   PatternFill('solid', fgColor='0F766E'),
-        'violet': PatternFill('solid', fgColor='5B21B6'),
-        'orange': PatternFill('solid', fgColor='C2410C'),
-        'slate':  PatternFill('solid', fgColor='334155'),
-        'green':  PatternFill('solid', fgColor='166534'),
-        'altA':   PatternFill('solid', fgColor='EFF6FF'),
-        'altB':   PatternFill('solid', fgColor='F0FDF4'),
-        'altC':   PatternFill('solid', fgColor='F5F3FF'),
-        'warn':   PatternFill('solid', fgColor='FEF3C7'),
-        'err':    PatternFill('solid', fgColor='FEE2E2'),
-        'ok':     PatternFill('solid', fgColor='D1FAE5'),
-        'info':   PatternFill('solid', fgColor='EFF6FF'),
-    }
-    WHITE = Font(bold=True, color='FFFFFF', size=10, name='Calibri')
-    NORM  = Font(size=10, name='Calibri')
-    BOLD  = Font(bold=True, size=10, name='Calibri')
-    SMALL = Font(size=9,  name='Calibri')
-    TITLE_FONT = Font(bold=True, color='FFFFFF', size=13, name='Calibri')
-    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
-    def write_title(ws, title_text, fill_key, span_cols, row=1):
-        last = get_column_letter(span_cols)
-        ws.merge_cells(f'A{row}:{last}{row}')
-        cell = ws[f'A{row}']
-        cell.value = title_text
-        cell.font  = TITLE_FONT
-        cell.fill  = FILLS[fill_key]
-        cell.alignment = CC
-        ws.row_dimensions[row].height = 30
-
-    def write_subheader(ws, text, fill_key, span_cols, row):
-        last = get_column_letter(span_cols)
-        ws.merge_cells(f'A{row}:{last}{row}')
-        cell = ws[f'A{row}']
-        cell.value = text
-        cell.font  = Font(italic=True, size=9, color='475569', name='Calibri')
-        cell.fill  = PatternFill('solid', fgColor='F8FAFC')
-        cell.alignment = LC
-        ws.row_dimensions[row].height = 16
-
-    def write_header_row(ws, row_n, headers, fill_key):
-        for ci, h in enumerate(headers, 1):
-            c = ws.cell(row_n, ci, value=h)
-            c.fill = FILLS[fill_key]; c.font = WHITE
-            c.alignment = CC; c.border = BDR
-        ws.row_dimensions[row_n].height = 22
-
-    def write_data_rows(ws, df, start_row, num_cols_set,
-                        alt_fill_key='altA', fmt='0.0000'):
-        cols = list(df.columns)
-        for ri, (_, row) in enumerate(df.iterrows()):
-            r   = start_row + ri
-            alt = FILLS[alt_fill_key] if ri % 2 == 0 else PatternFill()
-            for ci, col in enumerate(cols, 1):
-                val  = row[col]
-                cell = ws.cell(r, ci, value=val)
-                cell.border    = BDR
-                cell.fill      = alt
-                if col in num_cols_set:
-                    cell.font      = NORM
-                    cell.alignment = RC
-                    if isinstance(val, float):
-                        cell.number_format = fmt
-                else:
-                    cell.font      = NORM
-                    cell.alignment = LC
-            ws.row_dimensions[r].height = 16
-
-    def auto_col_widths(ws, df, extra=2, min_w=8, max_w=28):
-        for ci, col in enumerate(df.columns, 1):
-            try:
-                max_len = max(
-                    len(str(col)),
-                    df[col].astype(str).str.len().max() if len(df) > 0 else 0
-                )
-            except Exception:
-                max_len = len(str(col))
-            ws.column_dimensions[get_column_letter(ci)].width = min(max(max_len+extra, min_w), max_w)
-
-    def freeze(ws, cell='A3'):
-        ws.freeze_panes = cell
-
-    def summary_footer(ws, text, span_cols, row, fill_key='info'):
-        last = get_column_letter(span_cols)
-        ws.merge_cells(f'A{row}:{last}{row}')
-        c = ws[f'A{row}']
-        c.value     = text
-        c.font      = Font(bold=True, size=9, color='1E3A8A', name='Calibri')
-        c.fill      = FILLS[fill_key]
-        c.alignment = LC
-        c.border    = BDR
-        ws.row_dimensions[row].height = 18
-
-    n_cols = len(df_raw.columns)
-    num_set= set(num_cols)
-
-    # ══════════════════════════════════════════════════════════════
-    # SHEET 1 — Raw Cleaned Data (after imputation + IQR clamp)
-    # ══════════════════════════════════════════════════════════════
-    ws1 = wb.active
-    ws1.title = '1_Raw_Cleaned'
-    write_title(ws1, f'WWTP — Raw Cleaned Data  |  {orig_name}  |  {now_str}', 'navy', n_cols)
-    write_subheader(ws1,
-        'Step 1-6 applied: empty drop → sentinel replace → type coerce → median/mean impute → IQR clamp',
-        'navy', n_cols, 2)
-    write_header_row(ws1, 3, list(df_raw.columns), 'navy')
-    write_data_rows(ws1, df_raw, 4, num_set, 'altA', '0.0000')
-    auto_col_widths(ws1, df_raw)
-    freeze(ws1, 'A4')
-    summary_footer(ws1,
-        f'Total rows: {len(df_raw)}  |  Numeric cols: {len(num_cols)}  |  '
-        f'Missing imputed: {audit["step5_imputation"]["total_missing_before"]}  |  '
-        f'Outliers clamped: {audit["step6_outlier_iqr"]["total_outliers_clamped"]}',
-        n_cols, len(df_raw)+5, 'info')
-
-    # ══════════════════════════════════════════════════════════════
-    # SHEET 2 — Min-Max Normalised [0, 1]
-    # ══════════════════════════════════════════════════════════════
-    ws2 = wb.create_sheet('2_MinMax_Normalised')
-    write_title(ws2, f'Min-Max Normalised  [0 → 1]  |  {orig_name}', 'teal', n_cols)
-    write_subheader(ws2,
-        'Formula: x_norm = (x − min) / (max − min)   |   All numeric columns scaled to [0, 1]',
-        'teal', n_cols, 2)
-    write_header_row(ws2, 3, list(df_norm.columns), 'teal')
-    write_data_rows(ws2, df_norm, 4, num_set, 'altB', '0.0000')
-    auto_col_widths(ws2, df_norm)
-    freeze(ws2, 'A4')
-    summary_footer(ws2,
-        f'All {len(num_cols)} numeric columns normalised to [0, 1]  |  Rows: {len(df_norm)}',
-        n_cols, len(df_norm)+5, 'altB')
-
-    # ══════════════════════════════════════════════════════════════
-    # SHEET 3 — Z-Score Standardised (μ=0, σ=1)
-    # ══════════════════════════════════════════════════════════════
-    ws3 = wb.create_sheet('3_ZScore_Standardised')
-    write_title(ws3, f'Z-Score Standardised  (μ=0, σ=1)  |  {orig_name}', 'violet', n_cols)
-    write_subheader(ws3,
-        'Formula: z = (x − μ) / σ   |   Applied to raw cleaned data (pre-normalisation scale)',
-        'violet', n_cols, 2)
-    write_header_row(ws3, 3, list(df_z.columns), 'violet')
-    write_data_rows(ws3, df_z, 4, num_set, 'altC', '0.0000')
-    auto_col_widths(ws3, df_z)
-    freeze(ws3, 'A4')
-    summary_footer(ws3,
-        f'All {len(num_cols)} numeric columns standardised  |  Rows: {len(df_z)}',
-        n_cols, len(df_z)+5, 'altC')
-
-    # ══════════════════════════════════════════════════════════════
-    # SHEET 4 — Preprocessing Audit / Report
-    # ══════════════════════════════════════════════════════════════
-    ws4 = wb.create_sheet('4_Preprocessing_Report')
-    ws4.column_dimensions['A'].width = 32
-    ws4.column_dimensions['B'].width = 28
-    ws4.column_dimensions['C'].width = 38
-    ws4.column_dimensions['D'].width = 22
-    ws4.column_dimensions['E'].width = 22
-
-    write_title(ws4, 'Preprocessing Pipeline — Audit Report', 'slate', 5)
-
-    STEP_MAP = [
-        ('STEP 1 — File Reading',
-         [('Original File', orig_name),
-          ('Rows Read', audit['step1_read']['rows']),
-          ('Columns Read', audit['step1_read']['cols'])]),
-        ('STEP 2 — Drop Empty Rows / Columns',
-         [('Rows Dropped', audit['step2_drop_empty']['rows_dropped']),
-          ('Columns Dropped', audit['step2_drop_empty']['cols_dropped'])]),
-        ('STEP 3 — Sentinel / Day-Off String Replacement',
-         [('Cells replaced with NaN', audit['step3_sentinel_replace']['cells_replaced_with_nan'])]),
-        ('STEP 4 — Type Coercion',
-         [('Numeric Columns', audit['step4_type_coercion']['numeric_cols']),
-          ('Text Columns', audit['step4_type_coercion']['text_cols'])]),
-        ('STEP 5 — Missing Value Imputation (Median / Mean)',
-         [('Total Missing Cells', audit['step5_imputation']['total_missing_before']),
-          ('Total Imputed', audit['step5_imputation']['total_imputed'])]
-         + [(f"  {col}", f"filled {v['missing']} cells with {v['method']} = {v['fill_value']}")
-            for col, v in audit['step5_imputation']['per_column'].items()]),
-        ('STEP 6 — IQR Outlier Detection & Winsorisation',
-         [('Total Outliers Clamped', audit['step6_outlier_iqr']['total_outliers_clamped'])]
-         + [(f"  {col}",
-             f"{v['outliers_clamped']} clamped  [fence: {v['lower_fence']} – {v['upper_fence']}]")
-            for col, v in audit['step6_outlier_iqr']['per_column'].items()]),
-        ('STEP 7 — Min-Max Normalisation  [0, 1]',
-         [(f"  {col}", f"min={v['min']}  max={v['max']}")
-          for col, v in audit['step7_minmax_norm']['per_column'].items()]),
-        ('STEP 8 — Z-Score Standardisation  (μ=0, σ=1)',
-         [(f"  {col}", f"mean={v['mean']}  std={v['std']}")
-          for col, v in audit['step8_zscore']['per_column'].items()]),
-        ('STEP 9 — Duplicate Row Removal',
-         [('Duplicate Rows Removed', audit['step9_dedup']['duplicate_rows_removed']),
-          ('Final Rows', audit['step9_dedup']['final_rows'])]),
-        ('STEP 10 — Final Summary',
-         [('Original Shape', str(audit['step10_summary']['original_shape'])),
-          ('Final Shape', str(audit['step10_summary']['final_shape'])),
-          ('Numeric Columns', audit['step10_summary']['numeric_columns']),
-          ('Text Columns', audit['step10_summary']['text_columns'])]),
-    ]
-
-    STEP_FILLS = ['navy','teal','violet','orange','slate','green','teal','violet','navy','slate']
-    STEP_BG    = ['EFF6FF','F0FDF4','F5F3FF','FFF7ED','F8FAFC','ECFDF5',
-                  'E0F2FE','EDE9FE','EFF6FF','F8FAFC']
-
-    r = 2
-    for step_idx, (step_name, rows) in enumerate(STEP_MAP):
-        # Step banner
-        ws4.merge_cells(f'A{r}:E{r}')
-        sc = ws4[f'A{r}']
-        sc.value     = step_name
-        sc.font      = Font(bold=True, color='FFFFFF', size=11, name='Calibri')
-        sc.fill      = FILLS[STEP_FILLS[step_idx % len(STEP_FILLS)]]
-        sc.alignment = LC
-        sc.border    = MBDR
-        ws4.row_dimensions[r].height = 22; r += 1
-
-        for key, val in rows:
-            bg = PatternFill('solid', fgColor=STEP_BG[step_idx % len(STEP_BG)])
-            kc = ws4.cell(r, 1, value=str(key))
-            kc.font = BOLD; kc.fill = bg; kc.border = BDR; kc.alignment = LC
-            vc = ws4.cell(r, 2, value=str(val))
-            vc.font = NORM; vc.fill = bg; vc.border = BDR; vc.alignment = LC
-            for c in [3,4,5]:
-                cc = ws4.cell(r, c)
-                cc.fill = bg; cc.border = BDR
-            ws4.row_dimensions[r].height = 16; r += 1
-        r += 1
-
-    # ══════════════════════════════════════════════════════════════
-    # SHEET 5 — Descriptive Statistics
-    # ══════════════════════════════════════════════════════════════
-    ws5 = wb.create_sheet('5_Statistics_Summary')
-
-    stat_hdrs = ['Column', 'Count', 'Mean', 'Median', 'Std Dev',
-                 'Min', 'Max', 'Range', 'Skewness', 'Kurtosis',
-                 'Missing (raw)', 'Outliers (IQR)']
-    nc5 = len(stat_hdrs)
-    for i, w in enumerate([26,8,12,12,12,12,12,12,12,12,14,14], 1):
-        ws5.column_dimensions[get_column_letter(i)].width = w
-
-    write_title(ws5, 'Descriptive Statistics — All Numeric Columns', 'orange', nc5)
-    write_subheader(ws5,
-        'Computed on RAW cleaned data (after imputation, before normalisation)',
-        'orange', nc5, 2)
-    write_header_row(ws5, 3, stat_hdrs, 'orange')
-
-    missing_map  = {col: audit['step5_imputation']['per_column'].get(col, {}).get('missing', 0)
-                    for col in num_cols}
-    outlier_map  = {col: audit['step6_outlier_iqr']['per_column'].get(col, {}).get('outliers_clamped', 0)
-                    for col in num_cols}
-
-    STATUS_SKEW = {
-        lambda s: abs(s) < 0.5:  ('Normal dist.',  FILLS['ok'],   Font(size=9, color='166534')),
-        lambda s: abs(s) < 1.0:  ('Mild skew',     FILLS['warn'], Font(size=9, color='92400E')),
-    }
-
-    for ri, col in enumerate(num_cols, 4):
-        s    = df_raw[col].dropna()
-        mean = float(s.mean())
-        med  = float(s.median())
-        std  = float(s.std(ddof=1))
-        mn   = float(s.min())
-        mx   = float(s.max())
-        rng  = mx - mn
-        skw  = float(s.skew())
-        krt  = float(s.kurtosis())
-        miss = missing_map.get(col, 0)
-        outs = outlier_map.get(col, 0)
-
-        alt = FILLS['altA'] if ri % 2 == 0 else PatternFill()
-
-        vals = [col, len(s),
-                round(mean,4), round(med,4), round(std,4),
-                round(mn,4), round(mx,4), round(rng,4),
-                round(skw,4), round(krt,4), miss, outs]
-        aligns = [LC] + [RC]*11
-
-        for ci, (v, al) in enumerate(zip(vals, aligns), 1):
-            cell = ws5.cell(ri, ci, value=v)
-            cell.border    = BDR
-            cell.alignment = al
-            cell.fill      = alt
-            if ci == 1:
-                cell.font = BOLD
-            elif ci == 9:   # skewness — colour code
-                if abs(skw) >= 1.0:
-                    cell.fill = FILLS['err'];  cell.font = Font(bold=True, size=9, color='991B1B')
-                elif abs(skw) >= 0.5:
-                    cell.fill = FILLS['warn']; cell.font = Font(bold=True, size=9, color='92400E')
-                else:
-                    cell.fill = FILLS['ok'];   cell.font = Font(bold=True, size=9, color='166534')
-            elif ci == 12 and outs > 0:
-                cell.fill = FILLS['warn']; cell.font = Font(bold=True, size=9, color='92400E')
-            elif ci == 11 and miss > 0:
-                cell.fill = FILLS['warn']; cell.font = Font(bold=True, size=9, color='92400E')
-            else:
-                cell.font = Font(size=9, name='Calibri')
-                if isinstance(v, float):
-                    cell.number_format = '0.0000'
-        ws5.row_dimensions[ri].height = 16
-
-    summary_footer(ws5,
-        f'Total columns analysed: {len(num_cols)}  |  Skewness: green=normal, yellow=mild, red=high',
-        nc5, len(num_cols)+5, 'info')
-
-    # ══════════════════════════════════════════════════════════════
-    # SHEET 6 — Visual Charts
-    # ══════════════════════════════════════════════════════════════
-    from openpyxl.chart import BarChart, LineChart, Reference
-    ws6 = wb.create_sheet('6_Charts')
-    ws6.column_dimensions['A'].width = 22
-    ws6.column_dimensions['B'].width = 12
-
-    write_title(ws6, 'Visual Analysis Charts', 'green', 8)
-    ws6.row_dimensions[1].height = 28
-
-    # Write data tables for charts
-    # Table A: Missing values per column
-    ws6['A3'] = 'Column';        ws6['A3'].font = WHITE; ws6['A3'].fill = FILLS['navy']; ws6['A3'].alignment = CC; ws6['A3'].border = BDR
-    ws6['B3'] = 'Missing Count'; ws6['B3'].font = WHITE; ws6['B3'].fill = FILLS['navy']; ws6['B3'].alignment = CC; ws6['B3'].border = BDR
-    ws6['C3'] = 'Outliers';      ws6['C3'].font = WHITE; ws6['C3'].fill = FILLS['navy']; ws6['C3'].alignment = CC; ws6['C3'].border = BDR
-    ws6['D3'] = 'Mean (raw)';    ws6['D3'].font = WHITE; ws6['D3'].fill = FILLS['navy']; ws6['D3'].alignment = CC; ws6['D3'].border = BDR
-    ws6['E3'] = 'Std Dev';       ws6['E3'].font = WHITE; ws6['E3'].fill = FILLS['navy']; ws6['E3'].alignment = CC; ws6['E3'].border = BDR
-
-    for ri, col in enumerate(num_cols, 4):
-        ws6.cell(ri, 1, value=col).border   = BDR
-        ws6.cell(ri, 2, value=missing_map.get(col,0)).border = BDR
-        ws6.cell(ri, 3, value=outlier_map.get(col,0)).border = BDR
-        ws6.cell(ri, 4, value=round(float(df_raw[col].mean()),4)).border = BDR
-        ws6.cell(ri, 5, value=round(float(df_raw[col].std()),4)).border = BDR
-        ws6.row_dimensions[ri].height = 15
-
-    last_data = len(num_cols) + 3
-    cats_ref  = Reference(ws6, min_col=1, min_row=4, max_row=last_data)
-
-    # Chart 1 — Missing Values
-    bc_miss = BarChart()
-    bc_miss.title   = 'Missing Values per Column (before imputation)'
-    bc_miss.style   = 10; bc_miss.type = 'col'
-    bc_miss.y_axis.title = 'Count of Missing Values'
-    bc_miss.width = 22; bc_miss.height = 14
-    d_miss = Reference(ws6, min_col=2, min_row=3, max_row=last_data)
-    bc_miss.add_data(d_miss, titles_from_data=True)
-    bc_miss.set_categories(cats_ref)
-    bc_miss.series[0].graphicalProperties.solidFill = 'EF4444'
-    ws6.add_chart(bc_miss, 'G2')
-
-    # Chart 2 — Outliers
-    bc_out = BarChart()
-    bc_out.title   = 'Outliers Clamped per Column (IQR method)'
-    bc_out.style   = 10; bc_out.type = 'col'
-    bc_out.y_axis.title = 'Count of Outliers Clamped'
-    bc_out.width = 22; bc_out.height = 14
-    d_out = Reference(ws6, min_col=3, min_row=3, max_row=last_data)
-    bc_out.add_data(d_out, titles_from_data=True)
-    bc_out.set_categories(cats_ref)
-    bc_out.series[0].graphicalProperties.solidFill = 'F59E0B'
-    ws6.add_chart(bc_out, 'G22')
-
-    # Chart 3 — Mean per column
-    bc_mean = BarChart()
-    bc_mean.title   = 'Column Means — Raw Cleaned Data'
-    bc_mean.style   = 10; bc_mean.type = 'col'
-    bc_mean.y_axis.title = 'Mean Value'
-    bc_mean.width = 22; bc_mean.height = 14
-    d_mean = Reference(ws6, min_col=4, min_row=3, max_row=last_data)
-    bc_mean.add_data(d_mean, titles_from_data=True)
-    bc_mean.set_categories(cats_ref)
-    bc_mean.series[0].graphicalProperties.solidFill = '3B82F6'
-    ws6.add_chart(bc_mean, 'G42')
-
-    # Chart 4 — Std Dev per column
-    bc_std = BarChart()
-    bc_std.title   = 'Column Std Dev — Raw Cleaned Data'
-    bc_std.style   = 10; bc_std.type = 'col'
-    bc_std.y_axis.title = 'Standard Deviation'
-    bc_std.width = 22; bc_std.height = 14
-    d_std = Reference(ws6, min_col=5, min_row=3, max_row=last_data)
-    bc_std.add_data(d_std, titles_from_data=True)
-    bc_std.set_categories(cats_ref)
-    bc_std.series[0].graphicalProperties.solidFill = '10B981'
-    ws6.add_chart(bc_std, 'G62')
-
-    # ── Save ───────────────────────────────────────────────────────────────────
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    return buf.read()
-
-
-# ── MAIN PREPROCESS ROUTE ─────────────────────────────────────────────────────
-@app.route('/api/preprocess', methods=['POST','OPTIONS'])
-def preprocess_file():
-    if request.method == 'OPTIONS':
-        return '', 200
-    try:
-        if 'file' not in request.files:
-            return jsonify({'success': False, 'error': 'No file uploaded'}), 400
-
-        file        = request.files['file']
-        orig_name   = file.filename
-        fname_lower = orig_name.lower()
-        file_bytes  = file.read()
-
-        if not (fname_lower.endswith('.xlsx') or fname_lower.endswith('.xls') or
-                fname_lower.endswith('.csv')):
-            return jsonify({'success': False, 'error': 'Unsupported file format. Use .xlsx, .xls or .csv'}), 400
-
-        # Output filename
-        pt_raw    = request.form.get('plantType', '') or orig_name.rsplit('.',1)[0]
-        _safe_pt  = ''.join(c for c in pt_raw if c.isalnum()).lower()
-        _hxp      = hashlib.md5(file_bytes).hexdigest()[:3]
-        _nwp      = datetime.now()
-        out_fname = (f'wwtp_{_safe_pt}_preprocessed_'
-                     f'{_nwp.strftime("%Y%m%d")}_{_nwp.strftime("%H%M%S")}_{_hxp}.xlsx')
-
-        # ── Try PMC STP multi-sheet Excel first ───────────────────────────────
-        stp_records = []
-        if fname_lower.endswith('.xlsx') or fname_lower.endswith('.xls'):
-            try:
-                stp_records = parse_stp_excel(file_bytes)
-            except Exception as e:
-                logger.info(f'STP parse skipped: {e}')
-
-        if stp_records:
-            # ── Build styled STP output (original v3 logic) ───────────────────
-            THIN     = Side(style='thin',   color='B0BEC5')
-            BDR      = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
-            CC       = Alignment(horizontal='center', vertical='center')
-            LC       = Alignment(horizontal='left',   vertical='center')
-            RC       = Alignment(horizontal='right',  vertical='center')
-            H_FILL   = PatternFill('solid', fgColor='1E3A8A')
-            H_FONT   = Font(bold=True, color='FFFFFF', size=10, name='Arial')
-            ALT_FILL = PatternFill('solid', fgColor='F0F4FF')
-            SUN_FILL = PatternFill('solid', fgColor='F1F5F9')
-            SUN_FONT = Font(italic=True, color='94A3B8', size=10, name='Arial')
-            ZERO_FNT = Font(italic=True, color='CBD5E1', size=10, name='Arial')
-            G_FILL   = PatternFill('solid', fgColor='D1FAE5')
-            R_FILL   = PatternFill('solid', fgColor='FEE2E2')
-            G_FONT   = Font(bold=True, color='065F46', size=10, name='Arial')
-            R_FONT   = Font(bold=True, color='991B1B', size=10, name='Arial')
-            NORM_F   = Font(size=10, name='Arial')
-
-            wb_stp = openpyxl.Workbook()
-            ws_stp = wb_stp.active
-            ws_stp.title = 'WWTP Clean Data'
-
-            ws_stp.merge_cells('E1:H1')
-            ws_stp['E1'].value = 'INLET Parameters'
-            ws_stp['E1'].fill  = PatternFill('solid', fgColor='1D4ED8')
-            ws_stp['E1'].font  = Font(bold=True, color='FFFFFF', size=10, name='Arial')
-            ws_stp['E1'].alignment = CC
-            ws_stp.merge_cells('I1:M1')
-            ws_stp['I1'].value = 'OUTLET Parameters'
-            ws_stp['I1'].fill  = PatternFill('solid', fgColor='065F46')
-            ws_stp['I1'].font  = Font(bold=True, color='FFFFFF', size=10, name='Arial')
-            ws_stp['I1'].alignment = CC
-            ws_stp.row_dimensions[1].height = 18
-
-            HEADERS_STP = ['Sr No.', 'Date', 'Plant', 'Flow (MLD)',
-                           'Inlet pH', 'Inlet BOD (mg/L)', 'Inlet COD (mg/L)', 'Inlet TSS (mg/L)',
-                           'Outlet pH', 'Outlet BOD (mg/L)', 'Outlet COD (mg/L)', 'Outlet TSS (mg/L)',
-                           'Chlorine (FC)', 'MPCB Compliant']
-            for ci, h in enumerate(HEADERS_STP, 1):
-                cell = ws_stp.cell(2, ci, value=h)
-                cell.fill = H_FILL; cell.font = H_FONT
-                cell.alignment = CC; cell.border = BDR
-            ws_stp.row_dimensions[2].height = 22
-
-            COL_KEYS = ['day','date','plant','flow_mld',
-                        'ph_in','bod_in','cod_in','tss_in',
-                        'ph_out','bod_out','cod_out','tss_out',
-                        'chlorine','label_compliant']
-            active_cnt = sunday_cnt = 0
-
-            for ri, rec in enumerate(stp_records):
-                is_sunday = (rec.get('ph_in', 0) == 0 and rec.get('cod_in', 0) == 0)
-                r         = ri + 3
-                row_fill  = SUN_FILL if is_sunday else (ALT_FILL if active_cnt % 2 == 0 else PatternFill())
-                if is_sunday: sunday_cnt += 1
-                else:         active_cnt += 1
-                for ci, key in enumerate(COL_KEYS, 1):
-                    v    = rec.get(key)
-                    cell = ws_stp.cell(r, ci, value=v)
-                    cell.border = BDR
-                    if is_sunday:
-                        cell.fill = SUN_FILL
-                        if   ci == 1: cell.font = SUN_FONT; cell.alignment = CC
-                        elif ci == 2:
-                            cell.font = Font(italic=True, color='64748B', size=10, name='Arial')
-                            cell.alignment = CC
-                            if hasattr(v, 'strftime'): cell.value = v.strftime('%d-%b-%Y')
-                        elif ci == 3:
-                            cell.font = Font(italic=True, color='64748B', size=10, name='Arial')
-                            cell.alignment = LC
-                        else: cell.font = ZERO_FNT; cell.alignment = CC
-                    else:
-                        cell.fill = row_fill
-                        if ci == 14:
-                            cell.fill  = G_FILL if v == 1 else R_FILL
-                            cell.font  = G_FONT if v == 1 else R_FONT
-                            cell.alignment = CC
-                            cell.value = '✓ Yes' if v == 1 else '✗ No'
-                        elif ci == 2:
-                            cell.font = NORM_F; cell.alignment = CC
-                            if hasattr(v, 'strftime'):
-                                cell.value = v.strftime('%d-%b-%Y')
-                                cell.number_format = 'DD-MMM-YYYY'
-                        elif ci == 3: cell.font = NORM_F; cell.alignment = LC
-                        elif ci == 1: cell.font = NORM_F; cell.alignment = CC
-                        else:         cell.font = NORM_F; cell.alignment = RC
-                ws_stp.row_dimensions[r].height = 17
-
-            ws_stp.freeze_panes = 'A3'
-            for ci, w in enumerate([7,13,12,10,9,16,16,16,10,17,17,17,13,14], 1):
-                ws_stp.column_dimensions[get_column_letter(ci)].width = w
-
-            sum_r = len(stp_records) + 4
-            ws_stp.merge_cells(f'A{sum_r}:N{sum_r}')
-            ws_stp[f'A{sum_r}'].value = (
-                f'TOTAL: {active_cnt} active days  |  {sunday_cnt} Sunday/Holiday rows (shown as 0)')
-            ws_stp[f'A{sum_r}'].font      = Font(bold=True, size=10, color='1E3A8A', name='Arial')
-            ws_stp[f'A{sum_r}'].alignment = LC
-
-            buf = io.BytesIO()
-            wb_stp.save(buf); buf.seek(0)
-            encoded = base64.b64encode(buf.read()).decode()
-            return jsonify({'success': True, 'rows': len(stp_records),
-                            'active': active_cnt, 'sundays': sunday_cnt,
-                            'columns': HEADERS_STP,
-                            'data_type': 'stp_excel',
-                            'file': encoded, 'filename': out_fname})
-
-        # ══════════════════════════════════════════════════════════════════════
-        # GENERIC FILE — run full 10-step pipeline
-        # ══════════════════════════════════════════════════════════════════════
-        result = full_preprocess_pipeline(file_bytes, fname_lower)
-
-        if len(result['df_norm']) == 0:
-            return jsonify({'success': False, 'error': 'No data rows remain after preprocessing'}), 400
-
-        excel_bytes = build_preprocessed_excel(result, orig_name)
-        encoded     = base64.b64encode(excel_bytes).decode()
-        audit       = result['audit']
-
-        return jsonify({
-            'success':        True,
-            'rows':           audit['step10_summary']['final_shape'][0],
-            'original_rows':  audit['step10_summary']['original_shape'][0],
-            'columns':        list(result['df_norm'].columns),
-            'numeric_cols':   len(result['num_cols']),
-            'missing_imputed':audit['step5_imputation']['total_missing_before'],
-            'outliers_clamped':audit['step6_outlier_iqr']['total_outliers_clamped'],
-            'duplicates_removed': audit['step9_dedup']['duplicate_rows_removed'],
-            'data_type':      'scada_csv' if fname_lower.endswith('.csv') else 'generic',
-            'file':           encoded,
-            'filename':       out_fname,
-            'sheets': [
-                '1_Raw_Cleaned',
-                '2_MinMax_Normalised',
-                '3_ZScore_Standardised',
-                '4_Preprocessing_Report',
-                '5_Statistics_Summary',
-                '6_Charts'
+        }
+        @media (max-width: 1024px) {
+            .action-buttons {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <h1>
+                <div class="header-icon">⚡</div>
+                WWTP Simulation & Neural Prediction System
+            </h1>
+        </div>
+
+        <!-- Plant Type Selection -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-icon">🏭</span>
+                <h2>Select WWTP Type</h2>
+            </div>
+            <div class="form-group">
+                <select id="plantType" onchange="updateParameters()">
+                    <option value="">-- Select Plant Type --</option>
+                    <option value="asp">Activated Sludge Process (ASP)</option>
+                    <option value="mbr">Membrane Bioreactor (MBR)</option>
+                    <option value="sbr">Sequencing Batch Reactor (SBR)</option>
+                    <option value="mle">Modified Ludzack-Ettinger (MLE)</option>
+                    <option value="bardenpho">Bardenpho Process</option>
+                </select>
+            </div>
+            
+            <!-- Added Upload Zone Section -->
+            <div class="upload-zone" id="uploadZone" onclick="document.getElementById('fileInput').click()">
+                <div class="upload-icon">⬆️</div>
+                <h3>Drop Excel file here or click to upload</h3>
+                <p style="color: #6b7280; margin-top: 10px;">
+                    Supports .xlsx, .xls, .csv (MATLAB compatible)
+                </p>
+                <input type="file" id="fileInput" style="display: none;" accept=".xlsx,.xls,.csv" onchange="handleFileUpload(event)">
+            </div>
+        </div>
+
+        <!-- Input Parameters -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-icon">📊</span>
+                <h2>Input Parameters & Values</h2>
+            </div>
+            <div class="btn-group">
+                <button class="btn btn-secondary" onclick="loadDefaults()">LOAD DEFAULT VALUES</button>
+                <button class="btn btn-secondary" onclick="clearAll()">CLEAR ALL</button>
+                <button class="btn btn-secondary" onclick="randomizeData()">RANDOMIZE TEST DATA</button>
+            </div>
+            <p style="margin-bottom: 15px; color: #6b7280;">
+                Check to select parameter for modeling | Enter value for simulation
+            </p>
+            <div id="parameterContainer" class="parameter-grid">
+                <p style="color: #9ca3af; font-style: italic; grid-column: 1/-1;">
+                    Please select a plant type first...
+                </p>
+            </div>
+        </div>
+
+        <!-- Output Parameters -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-icon">📈</span>
+                <h2>Output Parameters</h2>
+            </div>
+            <p style="margin-bottom: 15px;">Select target output variables for prediction:</p>
+            <div id="outputContainer" style="color: #9ca3af; font-style: italic;">
+                Please select a plant type first...
+            </div>
+        </div>
+
+        <!-- Network Architecture -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-icon">🧠</span>
+                <h2>Network Architecture</h2>
+            </div>
+            <div class="form-group">
+                <label>Network Type:</label>
+                <select id="networkType" onchange="updateNetwork()">
+                    <option value="feedforward">Feed Forward (FF)</option>
+                    <option value="pattern">Pattern Recognition</option>
+                    <option value="fit">Fitting Network</option>
+                    <option value="lstm">LSTM</option>
+                    <option value="gru">GRU</option>
+                    <option value="cnn">CNN</option>
+                </select>
+            </div>
+            
+            <div class="network-config">
+                <div class="config-card">
+                    <h3>Hidden Layers</h3>
+                    <input type="number" id="hiddenLayers" class="number" value="1" min="1" max="5" onchange="updateNetwork()">
+                </div>
+                <div class="config-card">
+                    <h3>Neurons per Layer</h3>
+                    <input type="number" id="neuronsPerLayer" class="number" value="10" min="1" max="50" onchange="updateNetwork()">
+                </div>
+            </div>
+
+            <!-- MATLAB-style Network Visualization -->
+            <div class="matlab-network-container">
+                <div class="matlab-title-bar">
+                    <div class="matlab-icon">M</div>
+                    <span class="matlab-title" id="networkTitle">Pattern Recognition Neural Network (view)</span>
+                </div>
+                <div class="network-diagram" id="networkDiagram">
+                    <div class="layer-container" id="layerContainer">
+                        <!-- Dynamic content will be generated here -->
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Data & Prediction Settings -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-icon">📅</span>
+                <h2>Data & Prediction Settings</h2>
+            </div>
+            <div class="prediction-horizon">
+                <div class="form-group">
+                    <label>Input Date (Training Start):</label>
+                    <input type="date" id="startDate" value="2024-01-01" onchange="updateOutputDate()">
+                </div>
+                <div class="form-group">
+                    <label>Prediction Horizon (Days):</label>
+                    <input type="number" id="horizon" value="7" min="1" max="30" onchange="updateOutputDate()">
+                    <div class="date-display">
+                        <strong>Output Date:</strong> <span id="outputDate">2024-01-08</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="action-buttons">
+                <button class="btn btn-primary" onclick="runPrediction()">RUN PREDICTION</button>
+                <button class="btn btn-success" onclick="exportExcel()">EXPORT TO EXCEL</button>
+                <button class="btn btn-warning" onclick="exportMat()">⬇ DOWNLOAD MATLAB SCRIPT</button>
+                <button class="btn btn-warning" id="btnDownloadPreprocessed" onclick="downloadPreprocessed()" style="background:linear-gradient(135deg,#0f766e,#14b8a6);border-color:#0f766e;" disabled>⬇ DOWNLOAD PREPROCESSED DATA</button>
+            </div>
+
+            <!-- MATLAB Instruction Card -->
+            <div id="matlabInstructionCard" style="
+                background: linear-gradient(135deg, #0f172a 0%, #1e3a8a 100%);
+                border-radius: 16px;
+                padding: 22px 26px;
+                margin-top: 18px;
+                color: white;
+                box-shadow: 0 8px 32px rgba(30,58,138,0.35);
+                border: 1px solid rgba(99,179,237,0.25);
+            ">
+                <div style="display:flex; align-items:center; gap:12px; margin-bottom:16px;">
+                    <div style="background:linear-gradient(135deg,#ff6b35,#f7931e);border-radius:10px;width:42px;height:42px;display:flex;align-items:center;justify-content:center;font-size:1.4rem;flex-shrink:0;">M</div>
+                    <div>
+                        <div style="font-size:1.05rem;font-weight:700;letter-spacing:0.3px;">Run Your Simulation in MATLAB</div>
+                        <div style="font-size:0.78rem;color:#93c5fd;margin-top:2px;">Works with Licensed MATLAB · Cracked MATLAB · MATLAB Online (Free)</div>
+                    </div>
+                </div>
+
+                <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; margin-bottom:18px;">
+                    <!-- Step 1 -->
+                    <div style="background:rgba(255,255,255,0.07);border-radius:12px;padding:14px;border:1px solid rgba(255,255,255,0.1);">
+                        <div style="background:#3b82f6;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.85rem;margin-bottom:10px;">1</div>
+                        <div style="font-weight:600;font-size:0.9rem;margin-bottom:6px;">Run Prediction</div>
+                        <div style="font-size:0.78rem;color:#cbd5e1;line-height:1.5;">Set your plant parameters above and click <strong style="color:white;">RUN PREDICTION</strong> first to generate your simulation data.</div>
+                    </div>
+                    <!-- Step 2 -->
+                    <div style="background:rgba(255,255,255,0.07);border-radius:12px;padding:14px;border:1px solid rgba(255,255,255,0.1);">
+                        <div style="background:#f59e0b;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.85rem;margin-bottom:10px;">2</div>
+                        <div style="font-weight:600;font-size:0.9rem;margin-bottom:6px;">Download Script</div>
+                        <div style="font-size:0.78rem;color:#cbd5e1;line-height:1.5;">Click <strong style="color:white;">⬇ DOWNLOAD MATLAB SCRIPT</strong> above. A <code style="background:rgba(255,255,255,0.15);padding:1px 5px;border-radius:4px;">.m</code> file will download to your computer.</div>
+                    </div>
+                    <!-- Step 3 -->
+                    <div style="background:rgba(255,255,255,0.07);border-radius:12px;padding:14px;border:1px solid rgba(255,255,255,0.1);">
+                        <div style="background:#10b981;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.85rem;margin-bottom:10px;">3</div>
+                        <div style="font-weight:600;font-size:0.9rem;margin-bottom:6px;">Open in MATLAB</div>
+                        <div style="font-size:0.78rem;color:#cbd5e1;line-height:1.5;">Open the file in your MATLAB (any version) and press <strong style="color:white;">Run</strong>. All 6 simulation figures open automatically.</div>
+                    </div>
+                </div>
+
+                <!-- Two option buttons -->
+                <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;">
+                    <div style="flex:1;min-width:220px;background:rgba(255,255,255,0.06);border-radius:12px;padding:14px 16px;border:1px solid rgba(255,255,255,0.12);">
+                        <div style="font-size:0.78rem;color:#93c5fd;font-weight:600;margin-bottom:4px;">💻 OPTION A — Local MATLAB (Licensed or Cracked)</div>
+                        <div style="font-size:0.78rem;color:#e2e8f0;line-height:1.5;">Download the script → Open MATLAB on your PC → Go to the downloaded file → Click <strong>Run</strong>. Works with any MATLAB version R2022b and above.</div>
+                    </div>
+                    <div style="flex:1;min-width:220px;background:rgba(255,255,255,0.06);border-radius:12px;padding:14px 16px;border:1px solid rgba(99,179,237,0.3);">
+                        <div style="font-size:0.78rem;color:#34d399;font-weight:600;margin-bottom:4px;">🌐 OPTION B — MATLAB Online (No Installation Needed)</div>
+                        <div style="font-size:0.78rem;color:#e2e8f0;line-height:1.5;margin-bottom:10px;">No MATLAB installed? Use the free browser version. Create a free MathWorks account, upload the script, and run it — all in your browser.</div>
+                        <a href="https://matlab.mathworks.com" target="_blank" style="
+                            display:inline-block;background:linear-gradient(135deg,#10b981,#059669);
+                            color:white;padding:7px 16px;border-radius:8px;font-size:0.8rem;
+                            font-weight:700;text-decoration:none;letter-spacing:0.3px;">
+                            🌐 Open MATLAB Online →
+                        </a>
+                    </div>
+                </div>
+
+                <div style="margin-top:14px;padding:10px 14px;background:rgba(245,158,11,0.12);border-radius:8px;border-left:3px solid #f59e0b;font-size:0.76rem;color:#fcd34d;line-height:1.5;">
+                    ⚠ <strong>Note for Cracked MATLAB users:</strong> Make sure your cracked version includes the <strong>Deep Learning Toolbox</strong>. If you see an error like <code style="background:rgba(0,0,0,0.2);padding:1px 5px;border-radius:3px;">Undefined function 'feedforwardnet'</code> — use MATLAB Online instead (Option B), which always has all toolboxes available for free.
+                </div>
+            </div>
+
+            <div class="status-bar" style="margin-top:14px;">
+                <div class="status-dot"></div>
+                <span>System Ready - Configure input parameters</span>
+                <span style="margin-left: auto; color: #6b7280;">Web Deployment Mode | MATLAB via Script Download</span>
+            </div>
+        </div>
+
+        <!-- Results Section (Hidden initially) -->
+        <div id="resultsSection" class="output-section" style="display: none;">
+            <h2 style="margin-bottom: 20px;">📊 Prediction Results</h2>
+            <div class="metric-cards">
+                <div class="metric-card">
+                    <div class="metric-value" id="rmse">0.024</div>
+                    <div class="metric-label">RMSE</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value" id="mae">0.018</div>
+                    <div class="metric-label">MAE</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value" id="r2">0.987</div>
+                    <div class="metric-label">R² Score</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value" id="accuracy">98.7%</div>
+                    <div class="metric-label">Accuracy</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Plant parameters database
+        const plantParameters = {
+            asp: [
+                { id: 'cod_inf', label: 'COD Influent', unit: 'mg/L', default: 450, min: 100, max: 1000 },
+                { id: 'bod_inf', label: 'BOD Influent', unit: 'mg/L', default: 250, min: 50, max: 500 },
+                { id: 'tss_inf', label: 'TSS Influent', unit: 'mg/L', default: 300, min: 50, max: 600 },
+                { id: 'nh3_inf', label: 'NH3-N Influent', unit: 'mg/L', default: 40, min: 10, max: 100 },
+                { id: 'flow', label: 'Flow Rate', unit: 'm³/d', default: 10000, min: 1000, max: 50000 },
+                { id: 'do', label: 'Dissolved Oxygen', unit: 'mg/L', default: 2.5, min: 0.5, max: 5.0 },
+                { id: 'mlss', label: 'MLSS', unit: 'mg/L', default: 3500, min: 1500, max: 5000 },
+                { id: 'sludge_age', label: 'Sludge Age', unit: 'd', default: 12, min: 5, max: 30 }
+            ],
+            mbr: [
+                { id: 'cod_inf', label: 'COD Influent', unit: 'mg/L', default: 500, min: 100, max: 1000 },
+                { id: 'bod_inf', label: 'BOD Influent', unit: 'mg/L', default: 300, min: 50, max: 600 },
+                { id: 'tmp', label: 'Transmembrane Pressure', unit: 'kPa', default: 0.25, min: 0.1, max: 0.5 },
+                { id: 'flux', label: 'Membrane Flux', unit: 'LMH', default: 25, min: 10, max: 40 },
+                { id: 'do', label: 'Dissolved Oxygen', unit: 'mg/L', default: 3.0, min: 1.0, max: 6.0 },
+                { id: 'srt', label: 'SRT', unit: 'd', default: 20, min: 10, max: 40 }
+            ],
+            sbr: [
+                { id: 'cod_inf', label: 'COD Influent', unit: 'mg/L', default: 400, min: 100, max: 800 },
+                { id: 'cycle_time', label: 'Cycle Time', unit: 'h', default: 8, min: 4, max: 12 },
+                { id: 'fill_time', label: 'Fill Time', unit: 'h', default: 2, min: 0.5, max: 3 },
+                { id: 'react_time', label: 'React Time', unit: 'h', default: 4, min: 2, max: 8 },
+                { id: 'do', label: 'Dissolved Oxygen', unit: 'mg/L', default: 2.0, min: 0.5, max: 4.0 }
+            ],
+            mle: [
+                { id: 'cod_inf', label: 'COD Influent', unit: 'mg/L', default: 450, min: 100, max: 1000 },
+                { id: 'tn_inf', label: 'Total Nitrogen', unit: 'mg/L', default: 60, min: 20, max: 120 },
+                { id: 'internal_recycle', label: 'Internal Recycle Ratio', unit: '%', default: 200, min: 100, max: 400 },
+                { id: 'sludge_recycle', label: 'Sludge Recycle Ratio', unit: '%', default: 50, min: 25, max: 100 }
+            ],
+            bardenpho: [
+                { id: 'cod_inf', label: 'COD Influent', unit: 'mg/L', default: 500, min: 100, max: 1200 },
+                { id: 'tp_inf', label: 'Total Phosphorus', unit: 'mg/L', default: 8, min: 2, max: 20 },
+                { id: 'stages', label: 'Anoxic Stages', unit: 'count', default: 2, min: 1, max: 3 },
+                { id: 'anaerobic_hrt', label: 'Anaerobic HRT', unit: 'h', default: 1.5, min: 0.5, max: 3 }
             ]
-        })
+        };
 
-    except ValueError as ve:
-        logger.warning(f'Preprocessing ValueError: {ve}')
-        return jsonify({'success': False, 'error': str(ve)}), 400
-    except Exception as e:
-        logger.error(f'Preprocessing error: {e}', exc_info=True)
-        return jsonify({'success': False, 'error': str(e)}), 500
+        const outputParameters = {
+            asp: ['COD Effluent', 'BOD Effluent', 'TSS Effluent', 'NH3-N Effluent', 'Sludge Volume Index'],
+            mbr: ['COD Effluent', 'BOD Effluent', 'NH3-N Effluent', 'TMP Trend', 'Fouling Rate'],
+            sbr: ['COD Effluent', 'BOD Effluent', 'Cycle Efficiency', 'Denitrification Rate'],
+            mle: ['TN Effluent', 'NH3-N Effluent', 'NO3-N Effluent', 'Denitrification Efficiency'],
+            bardenpho: ['TP Effluent', 'PO4-P Effluent', 'COD Effluent', 'Nitrogen Removal', 'Phosphorus Removal']
+        };
 
+        let currentParams = [];
 
-# ── EXPORT EXCEL ──────────────────────────────────────────────────────────────
-@app.route('/api/export-excel', methods=['POST','OPTIONS'])
-def export_excel():
-    if request.method == 'OPTIONS': return '',200
-    try:
-        from openpyxl.chart import BarChart, LineChart, Reference
-    except ImportError:
-        pass
+        function updateParameters() {
+            const plantType = document.getElementById('plantType').value;
+            const container = document.getElementById('parameterContainer');
+            const outputContainer = document.getElementById('outputContainer');
+            
+            if (!plantType) {
+                container.innerHTML = '<p style="color: #9ca3af; font-style: italic; grid-column: 1/-1;">Please select a plant type first...</p>';
+                outputContainer.innerHTML = 'Please select a plant type first...';
+                updateNetwork();
+                return;
+            }
 
-    d           = request.get_json()
-    pt          = d.get('plantType','')
-    params      = d.get('params',{})
-    sel_inp_ids = d.get('selectedInputs',[])
-    sel_out_idx = d.get('selectedOutputs',[])
-    results     = d.get('results',[])
-    metrics     = d.get('metrics',{})
-    history     = metrics.get('history',{})
-    nn_cfg      = d.get('nnConfig',{})
-    nn_img_b64  = d.get('networkDiagramImage','')
-    start_date_str = d.get('startDate', datetime.now().strftime('%Y-%m-%d'))
-    horizon     = int(d.get('horizon', 7))
+            // Generate input parameters
+            currentParams = plantParameters[plantType] || [];
+            container.innerHTML = currentParams.map(param => `
+                <div class="parameter-item">
+                    <input type="checkbox" id="check_${param.id}" checked onchange="updateNetwork()">
+                    <div style="flex: 1;">
+                        <label for="check_${param.id}" style="margin: 0; font-size: 0.9rem;">
+                            ${param.label} (${param.unit})
+                        </label>
+                        <input type="number" id="val_${param.id}" value="${param.default}" 
+                               min="${param.min}" max="${param.max}" step="0.1">
+                    </div>
+                </div>
+            `).join('');
 
-    pdata    = PLANT_PARAMS.get(pt, {})
-    all_inp  = pdata.get('inputs', [])
-    all_out  = pdata.get('outputs', [])
-    out_u    = pdata.get('out_units', [])
-    stds     = pdata.get('standards', [])
-    sel_inp  = [p for p in all_inp if p['id'] in sel_inp_ids] if sel_inp_ids else all_inp
-    sel_out  = [all_out[i] for i in sel_out_idx] if sel_out_idx else all_out
+            // Generate output parameters
+            const outputs = outputParameters[plantType] || [];
+            outputContainer.innerHTML = `
+                <div class="parameter-grid">
+                    ${outputs.map((output, idx) => `
+                        <div class="parameter-item">
+                            <input type="checkbox" id="out_${idx}" checked onchange="updateNetwork()">
+                            <label for="out_${idx}" style="margin: 0;">${output}</label>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
 
-    now_str  = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    date_str = datetime.now().strftime('%Y-%m-%d')
+            // Update network visualization with new input/output count
+            updateNetwork();
+        }
 
-    HDR_FILL  = PatternFill('solid', fgColor='1E3A8A')
-    HDR_FONT  = Font(bold=True, color='FFFFFF', size=11)
-    THIN = Side(style='thin', color='CBD5E1')
-    BORDER= Border(left=THIN,right=THIN,top=THIN,bottom=THIN)
-    CENTER= Alignment(horizontal='center', vertical='center')
-    LEFT  = Alignment(horizontal='left',   vertical='center')
-    RIGHT = Alignment(horizontal='right',  vertical='center')
+        function getSelectedCount(type) {
+            const plantType = document.getElementById('plantType').value;
+            if (!plantType) return type === 'input' ? 3 : 2;
+            
+            if (type === 'input') {
+                const checkboxes = document.querySelectorAll('#parameterContainer input[type="checkbox"]');
+                return Array.from(checkboxes).filter(cb => cb.checked).length || 3;
+            } else {
+                const checkboxes = document.querySelectorAll('#outputContainer input[type="checkbox"]');
+                return Array.from(checkboxes).filter(cb => cb.checked).length || 2;
+            }
+        }
 
-    STATUS_FILL = {
-        'GOOD FIT':      PatternFill('solid', fgColor='D1FAE5'),
-        'UNDERFIT MODEL':PatternFill('solid', fgColor='FEF3C7'),
-        'OVERFIT MODEL': PatternFill('solid', fgColor='FEE2E2'),
-    }
-    STATUS_FONT = {
-        'GOOD FIT':      Font(bold=True, color='065F46', size=10),
-        'UNDERFIT MODEL':Font(bold=True, color='92400E', size=10),
-        'OVERFIT MODEL': Font(bold=True, color='991B1B', size=10),
-    }
+        function loadDefaults() {
+            const plantType = document.getElementById('plantType').value;
+            if (plantType) updateParameters();
+        }
 
-    def set_header_row(ws, row, cols):
-        for c, val in enumerate(cols, 1):
-            cell = ws.cell(row=row, column=c, value=val)
-            cell.fill = HDR_FILL; cell.font = HDR_FONT
-            cell.alignment = CENTER; cell.border = BORDER
+        function clearAll() {
+            document.querySelectorAll('input[type="number"]').forEach(input => input.value = '');
+            document.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = false);
+            updateNetwork();
+        }
 
-    wb = openpyxl.Workbook()
-    ws1 = wb.active
-    ws1.title = 'Summary'
-    ws1.column_dimensions['A'].width = 38
-    ws1.column_dimensions['B'].width = 22
-    ws1.column_dimensions['C'].width = 22
-    ws1.column_dimensions['D'].width = 22
-    ws1.column_dimensions['E'].width = 22
+        function randomizeData() {
+            const plantType = document.getElementById('plantType').value;
+            if (!plantType) return;
+            
+            currentParams.forEach(param => {
+                const randomVal = (Math.random() * (param.max - param.min) + param.min).toFixed(2);
+                const input = document.getElementById(`val_${param.id}`);
+                if (input) input.value = randomVal;
+            });
+        }
 
-    ws1.merge_cells('A1:E1')
-    t = ws1['A1']
-    t.value = 'WWTP Simulation & Neural Prediction System — Results'
-    t.font  = Font(bold=True, color='FFFFFF', size=15)
-    t.fill  = PatternFill('solid', fgColor='0F172A')
-    t.alignment = CENTER
-    ws1.row_dimensions[1].height = 32
+        // MATLAB-style Neural Network Visualization
+        function updateNetwork() {
+            const networkType = document.getElementById('networkType').value;
+            const hiddenLayers = parseInt(document.getElementById('hiddenLayers').value) || 1;
+            const neuronsPerLayer = parseInt(document.getElementById('neuronsPerLayer').value) || 10;
+            
+            const inputCount = getSelectedCount('input');
+            const outputCount = getSelectedCount('output');
+            
+            // Update title
+            const titles = {
+                'feedforward': 'Feed Forward Neural Network (view)',
+                'pattern': 'Pattern Recognition Neural Network (view)',
+                'fit': 'Fitting Neural Network (view)',
+                'lstm': 'LSTM Neural Network (view)',
+                'gru': 'GRU Neural Network (view)',
+                'cnn': 'CNN Neural Network (view)'
+            };
+            document.getElementById('networkTitle').textContent = titles[networkType] || 'Neural Network (view)';
+            
+            // Generate diagram
+            const container = document.getElementById('layerContainer');
+            let html = '';
+            
+            // Input Layer
+            html += createInputLayer(inputCount);
+            
+            // Hidden Layers
+            for (let i = 0; i < hiddenLayers; i++) {
+                html += createConnector();
+                html += createHiddenLayer(neuronsPerLayer, i + 1);
+            }
+            
+            // Output Layer
+            html += createConnector();
+            html += createOutputLayer(outputCount);
+            
+            // Final Output
+            html += createConnector();
+            html += createFinalOutput(outputCount);
+            
+            container.innerHTML = html;
+        }
 
-    ws1.merge_cells('A2:E2')
-    ws1['A2'].value = f'Plant: {pdata.get("label",pt.upper())}   |   Date: {now_str}   |   Network: {nn_cfg.get("networkType","feedforward").upper()}'
-    ws1['A2'].font  = Font(italic=True, color='6B7280', size=10)
-    ws1['A2'].alignment = CENTER
-    ws1['A2'].fill  = PatternFill('solid', fgColor='F1F5F9')
+        function createInputLayer(count) {
+            return `
+                <div class="layer-box">
+                    <div class="layer-label">Input</div>
+                    <div class="neuron-group">
+                        <div class="matlab-neuron input-neuron">${count}</div>
+                    </div>
+                    <div class="node-count">${count} nodes</div>
+                </div>
+            `;
+        }
 
-    r = 4
-    ws1.merge_cells(f'A{r}:E{r}')
-    ws1[f'A{r}'].value = '📊  INPUT PARAMETERS'
-    ws1[f'A{r}'].font  = Font(bold=True, color='1D4ED8', size=12)
-    ws1[f'A{r}'].fill  = PatternFill('solid', fgColor='EFF6FF')
-    ws1[f'A{r}'].alignment = LEFT
-    ws1.row_dimensions[r].height = 22; r+=1
+        function createHiddenLayer(neurons, layerNum) {
+            return `
+                <div class="layer-box">
+                    <div class="layer-label">Hidden ${layerNum}</div>
+                    <div class="neuron-group">
+                        <div class="matlab-neuron hidden-neuron">
+                            <div class="hidden-detail">
+                                <div style="display: flex; gap: 2px;">
+                                    <div class="weight-box">W</div>
+                                    <div class="bias-box">b</div>
+                                </div>
+                                <div class="math-symbol">⊕</div>
+                                <div style="font-size: 12px;">f(·)</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="node-count">${neurons} neurons</div>
+                </div>
+            `;
+        }
 
-    set_header_row(ws1, r, ['Parameter', 'Unit', 'Value', 'Min', 'Max']); r+=1
-    for p in sel_inp:
-        val = params.get(p['id'], p['default'])
-        for ci, v in enumerate([p['label'], p['unit'], val, p['min'], p['max']], 1):
-            cell = ws1.cell(r, ci, value=v)
-            cell.border = BORDER
-            cell.font   = Font(size=10)
-            cell.alignment = RIGHT if ci > 2 else LEFT
-        r += 1
+        function createOutputLayer(count) {
+            return `
+                <div class="layer-box">
+                    <div class="layer-label">Output</div>
+                    <div class="neuron-group">
+                        <div class="matlab-neuron output-neuron">
+                            <div class="hidden-detail">
+                                <div style="display: flex; gap: 2px;">
+                                    <div class="weight-box">W</div>
+                                    <div class="bias-box">b</div>
+                                </div>
+                                <div class="math-symbol">⊕</div>
+                                <div style="font-size: 10px;">softmax</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="node-count">${count} outputs</div>
+                </div>
+            `;
+        }
 
-    r += 1
-    ws1.merge_cells(f'A{r}:E{r}')
-    ws1[f'A{r}'].value = '📈  OUTPUT PARAMETERS'
-    ws1[f'A{r}'].font  = Font(bold=True, color='065F46', size=12)
-    ws1[f'A{r}'].fill  = PatternFill('solid', fgColor='ECFDF5')
-    ws1[f'A{r}'].alignment = LEFT
-    ws1.row_dimensions[r].height = 22; r+=1
+        function createFinalOutput(count) {
+            return `
+                <div class="layer-box">
+                    <div class="layer-label">Output</div>
+                    <div class="neuron-group">
+                        <div class="matlab-neuron input-neuron" style="background: linear-gradient(135deg, #FFB6C1, #FF69B4); border-color: #C71585;">${count}</div>
+                    </div>
+                    <div class="node-count">${count} classes</div>
+                </div>
+            `;
+        }
 
-    set_header_row(ws1, r, ['Parameter', 'Unit', 'Actual Value', 'Predicted Value', 'Status']); r+=1
-    for row in results:
-        ns = sum(ord(c) for c in row['parameter'])
-        actual_val = round(float(row['predicted']) * (1 + math.sin(ns * 1234.5) * 0.05), 4)
-        for ci, (v, al) in enumerate(zip(
-            [row['parameter'], row['unit'], actual_val, row['predicted'], row['status']],
-            [LEFT, CENTER, RIGHT, RIGHT, CENTER]
-        ), 1):
-            cell = ws1.cell(r, ci, value=v)
-            cell.border = BORDER
-            if ci == 5:
-                cell.fill = STATUS_FILL.get(row['status'], PatternFill())
-                cell.font = STATUS_FONT.get(row['status'], Font(size=10))
-            else:
-                cell.font = Font(bold=(ci in [1,4]), size=10,
-                                 color='1D4ED8' if ci==4 else ('065F46' if ci==3 else '000000'))
-            cell.alignment = al
-        r += 1
+        function createConnector() {
+            return `
+                <div class="layer-connector">
+                    <div class="connector-dot"></div>
+                    <div class="connector-line-h"></div>
+                    <div class="arrow-right"></div>
+                    <div class="connector-dot"></div>
+                </div>
+            `;
+        }
 
-    r += 1
-    ws1.merge_cells(f'A{r}:E{r}')
-    ws1[f'A{r}'].value = '📐  MODEL PERFORMANCE METRICS'
-    ws1[f'A{r}'].font  = Font(bold=True, color='7C3AED', size=12)
-    ws1[f'A{r}'].fill  = PatternFill('solid', fgColor='F5F3FF')
-    ws1[f'A{r}'].alignment = LEFT
-    ws1.row_dimensions[r].height = 22; r+=1
+        function updateOutputDate() {
+            const startDate = new Date(document.getElementById('startDate').value);
+            const horizon = parseInt(document.getElementById('horizon').value) || 0;
+            const outputDate = new Date(startDate);
+            outputDate.setDate(outputDate.getDate() + horizon);
+            document.getElementById('outputDate').textContent = outputDate.toISOString().split('T')[0];
+        }
 
-    set_header_row(ws1, r, ['Metric', 'Value', 'Interpretation', '', '']); r+=1
-    for m_name, m_val, m_note in [
-        ('R² Score',  metrics.get('r2',''),       '(closer to 1.0 = better)'),
-        ('RMSE',      metrics.get('rmse',''),      '(lower = better)'),
-        ('MAE',       metrics.get('mae',''),       '(lower = better)'),
-        ('MSE',       metrics.get('mse',''),       '(lower = better)'),
-        ('Accuracy',  f"{metrics.get('accuracy','')}%", ''),
-    ]:
-        ws1.cell(r,1).value=m_name; ws1.cell(r,1).font=Font(bold=True,size=10); ws1.cell(r,1).border=BORDER
-        ws1.cell(r,2).value=m_val;  ws1.cell(r,2).font=Font(bold=True,color='7C3AED',size=11); ws1.cell(r,2).alignment=CENTER; ws1.cell(r,2).border=BORDER
-        ws1.cell(r,3).value=m_note; ws1.cell(r,3).font=Font(italic=True,color='6B7280',size=9);  ws1.cell(r,3).border=BORDER
-        for c in [4,5]: ws1.cell(r,c).border=BORDER
-        r += 1
+        // ── Parameter ID aliases: maps common column name variants → param id ──
+        const PARAM_ALIASES = {
+            'cod_inf': 'cod_inf', 'cod inf': 'cod_inf', 'cod influent': 'cod_inf',
+            'cod': 'cod_inf', 'chemical oxygen demand': 'cod_inf',
+            'bod_inf': 'bod_inf', 'bod inf': 'bod_inf', 'bod influent': 'bod_inf',
+            'bod': 'bod_inf', 'biological oxygen demand': 'bod_inf',
+            'tss_inf': 'tss_inf', 'tss inf': 'tss_inf', 'tss influent': 'tss_inf',
+            'tss': 'tss_inf', 'total suspended solids': 'tss_inf',
+            'nh3_inf': 'nh3_inf', 'nh3 inf': 'nh3_inf', 'nh3-n influent': 'nh3_inf',
+            'nh3': 'nh3_inf', 'nh3-n': 'nh3_inf', 'ammonia': 'nh3_inf', 'ammonia nitrogen': 'nh3_inf',
+            'flow': 'flow', 'flow rate': 'flow', 'flow_rate': 'flow', 'q': 'flow', 'flowrate': 'flow',
+            'do': 'do', 'dissolved oxygen': 'do', 'dissolved_oxygen': 'do', 'd.o': 'do', 'd.o.': 'do',
+            'mlss': 'mlss', 'mixed liquor': 'mlss', 'mixed liquor suspended solids': 'mlss',
+            'sludge_age': 'sludge_age', 'sludge age': 'sludge_age',
+            'srt': 'srt', 'solids retention time': 'sludge_age',
+            'tmp': 'tmp', 'transmembrane pressure': 'tmp', 'transmembrane_pressure': 'tmp',
+            'flux': 'flux', 'membrane flux': 'flux', 'membrane_flux': 'flux', 'lmh': 'flux',
+            'cycle_time': 'cycle_time', 'cycle time': 'cycle_time', 'cycle': 'cycle_time',
+            'fill_time': 'fill_time', 'fill time': 'fill_time', 'fill': 'fill_time',
+            'react_time': 'react_time', 'react time': 'react_time', 'react': 'react_time', 'reaction time': 'react_time',
+            'tn_inf': 'tn_inf', 'tn inf': 'tn_inf', 'total nitrogen': 'tn_inf', 'tn': 'tn_inf', 'total n': 'tn_inf',
+            'internal_recycle': 'internal_recycle', 'internal recycle': 'internal_recycle',
+            'internal recycle ratio': 'internal_recycle', 'ir': 'internal_recycle', 'irr': 'internal_recycle',
+            'sludge_recycle': 'sludge_recycle', 'sludge recycle': 'sludge_recycle',
+            'sludge recycle ratio': 'sludge_recycle', 'sr': 'sludge_recycle', 'srr': 'sludge_recycle',
+            'tp_inf': 'tp_inf', 'tp inf': 'tp_inf', 'total phosphorus': 'tp_inf',
+            'tp': 'tp_inf', 'total p': 'tp_inf', 'phosphorus': 'tp_inf',
+            'stages': 'stages', 'anoxic stages': 'stages', 'anoxic': 'stages',
+            'anaerobic_hrt': 'anaerobic_hrt', 'anaerobic hrt': 'anaerobic_hrt',
+            'hrt': 'anaerobic_hrt', 'hydraulic retention time': 'anaerobic_hrt',
+        };
 
-    # ── Sheet 2: Performance Charts ────────────────────────────────────────────
-    ws2 = wb.create_sheet('Performance Charts')
-    for ci, w in enumerate([10,16,16,16,16,16], 1):
-        ws2.column_dimensions[get_column_letter(ci)].width = w
-    ws2.merge_cells('A1:F1')
-    ws2['A1'].value = 'Training History & Performance Metrics'
-    ws2['A1'].font  = Font(bold=True, color='FFFFFF', size=14)
-    ws2['A1'].fill  = PatternFill('solid', fgColor='0F172A')
-    ws2['A1'].alignment = CENTER
-    ws2.row_dimensions[1].height = 30
+        function normalizeHeader(h) {
+            return h.trim().toLowerCase().replace(/\s*\(.*?\)/g, '').replace(/[-\/]/g, ' ').replace(/\s+/g, ' ').trim();
+        }
 
-    epochs = history.get('epochs', list(range(1,51)))
-    tl_h   = history.get('train_loss', [])
-    vl_h   = history.get('val_loss', [])
-    r2_h   = history.get('r2_hist', [])
-    rm_h   = history.get('rmse_hist', [])
-    ma_h   = history.get('mae_hist', [])
+        // Holds the parsed full dataset waiting to be sent for preprocessing
+        let _uploadedRows    = [];
+        let _uploadedHeaders = [];
 
-    for ci, h in enumerate(['Epoch','Train Loss','Val Loss','R² Score','RMSE','MAE'], 1):
-        cell = ws2.cell(2, ci, value=h)
-        cell.fill=HDR_FILL; cell.font=HDR_FONT; cell.alignment=CENTER; cell.border=BORDER
+        function applyAvgToParams(avgClean) {
+            let matched = 0;
+            Object.entries(avgClean).forEach(([pid, val]) => {
+                const el = document.getElementById(`val_${pid}`);
+                if (el) { el.value = val; matched++; }
+            });
+            return matched;
+        }
 
-    for i, ep_n in enumerate(epochs):
-        rn = i + 3
-        for ci, v in enumerate([ep_n,
-            tl_h[i] if i<len(tl_h) else '',
-            vl_h[i] if i<len(vl_h) else '',
-            r2_h[i] if i<len(r2_h) else '',
-            rm_h[i] if i<len(rm_h) else '',
-            ma_h[i] if i<len(ma_h) else ''], 1):
-            ws2.cell(rn,ci).value=v; ws2.cell(rn,ci).border=BORDER; ws2.cell(rn,ci).font=Font(size=9)
+        function showUploadProcessing(fileName, fileSize, nRows, nMatched, nParams) {
+            const zone = document.getElementById('uploadZone');
+            zone.innerHTML = `
+                <div class="upload-icon" style="animation:spin 1s linear infinite;">⚙️</div>
+                <h3 style="color:#1e3a8a;">Preprocessing <em>${fileName}</em>…</h3>
+                <p style="color:#6b7280;margin-top:6px;">
+                    ${(fileSize/1024).toFixed(1)} KB &nbsp;·&nbsp;
+                    <strong>${nRows}</strong> rows &nbsp;·&nbsp;
+                    <strong style="color:${nMatched>0?'#065f46':'#92400e'};">${nMatched}/${nParams} columns matched</strong>
+                </p>
+                <p style="margin-top:8px;font-size:0.78rem;color:#6b7280;">
+                    Applying: Mean Imputation → IQR Outlier Clamping → Min-Max Normalisation → Z-Score Standardisation
+                </p>
+                <input type="file" id="fileInput" style="display:none;" accept=".xlsx,.xls,.csv" onchange="handleFileUpload(event)">
+            `;
+        }
 
-    last_dr = len(epochs)+2
-    cats    = Reference(ws2, min_col=1, min_row=3, max_row=last_dr)
+        function showUploadDone(fileName, fileSize, nRows, dataTypeLabel, nParams, dlFname) {
+            const zone = document.getElementById('uploadZone');
+            zone.innerHTML = `
+                <div class="upload-icon">✅</div>
+                <h3 style="color:#1e3a8a;">${fileName}</h3>
+                <p style="color:#6b7280;margin-top:6px;">
+                    ${typeof fileSize === 'number' ? (fileSize/1024).toFixed(1)+' KB &nbsp;·&nbsp;' : ''}
+                    <strong>${nRows}</strong> records parsed &nbsp;·&nbsp;
+                    <strong style="color:#1e3a8a;">${dataTypeLabel}</strong>
+                </p>
+                <p style="margin-top:6px;font-size:0.82rem;font-weight:600;color:#065f46;">
+                    ✔ Downloaded: <code style="background:#f0fdf4;padding:1px 6px;border-radius:4px;">${dlFname}</code>
+                </p>
+                <p style="margin-top:4px;font-size:0.75rem;color:#6b7280;">Input fields filled with clean averages · Drop another file to reprocess</p>
+                <input type="file" id="fileInput" style="display:none;" accept=".xlsx,.xls,.csv" onchange="handleFileUpload(event)">
+            `;
+        }
 
-    from openpyxl.chart import BarChart, LineChart, Reference as Ref
-    for chart_def, anchor, col_range, colors in [
-        ('Training Loss', 'H2',  (2,3), ['3B82F6','EF4444']),
-        ('R² Score',      'H22', (4,4), ['10B981']),
-        ('RMSE & MAE',    'H42', (5,6), ['F59E0B','8B5CF6']),
-    ]:
-        lc = LineChart()
-        lc.title=chart_def; lc.style=10
-        lc.y_axis.title=chart_def; lc.x_axis.title='Epoch'
-        lc.width=18; lc.height=12
-        for ci in range(col_range[0], col_range[1]+1):
-            d = Ref(ws2, min_col=ci, min_row=2, max_row=last_dr)
-            lc.add_data(d, titles_from_data=True)
-        lc.set_categories(cats)
-        for si, col in enumerate(colors):
-            lc.series[si].graphicalProperties.line.solidFill = col
-        ws2.add_chart(lc, anchor)
+        function showUploadError(fileName, fileSize, nRows, nMatched, nParams, errMsg) {
+            const zone = document.getElementById('uploadZone');
+            zone.innerHTML = `
+                <div class="upload-icon">⚠️</div>
+                <h3 style="color:#991b1b;">${fileName}</h3>
+                <p style="color:#6b7280;margin-top:6px;">${(fileSize/1024).toFixed(1)} KB &nbsp;·&nbsp; ${nRows} rows</p>
+                <p style="margin-top:6px;font-size:0.82rem;font-weight:600;color:#991b1b;">Preprocessing failed: ${errMsg}</p>
+                <p style="margin-top:4px;font-size:0.75rem;color:#6b7280;">Drop the file again to retry</p>
+                <input type="file" id="fileInput" style="display:none;" accept=".xlsx,.xls,.csv" onchange="handleFileUpload(event)">
+            `;
+        }
 
-    # ── Sheet 3: Predicted vs Actual ──────────────────────────────────────────
-    ws3 = wb.create_sheet('Predicted vs Actual')
-    ws3.column_dimensions['A'].width = 36
-    ws3.column_dimensions['B'].width = 20
-    ws3.column_dimensions['C'].width = 20
-    ws3.merge_cells('A1:C1')
-    ws3['A1'].value='Actual vs Predicted'; ws3['A1'].font=Font(bold=True,color='FFFFFF',size=14)
-    ws3['A1'].fill=PatternFill('solid',fgColor='0F172A'); ws3['A1'].alignment=CENTER
-    ws3.row_dimensions[1].height=28
-    set_header_row(ws3, 2, ['Parameter','Actual','Predicted'])
-    for i, row in enumerate(results, 3):
-        ns  = sum(ord(c) for c in row['parameter'])
-        act = round(float(row['predicted'])*(1+math.sin(ns*1234.5)*0.05),4)
-        for ci, v in enumerate([row['parameter'], act, row['predicted']], 1):
-            cell = ws3.cell(i, ci, value=v)
-            cell.border=BORDER; cell.alignment=CENTER
-            cell.font=Font(bold=True,size=10,
-                           color='065F46' if ci==2 else ('1D4ED8' if ci==3 else '000000'))
+        // ── State ────────────────────────────────────────────────────────────────
+        let _rawFile          = null;   // the original File object dropped by user
+        let _preprocessedB64  = null;   // base64 of processed xlsx — ready to download
+        let _preprocessedName = null;   // filename for the download
 
-    last_pvs = len(results)+2
-    bc2 = BarChart(); bc2.title='Actual vs Predicted'; bc2.style=10; bc2.type='col'
-    bc2.y_axis.title='Value'; bc2.width=26; bc2.height=16
-    for ci, col in [(2,'10B981'),(3,'3B82F6')]:
-        d = Ref(ws3, min_col=ci, min_row=2, max_row=last_pvs)
-        bc2.add_data(d, titles_from_data=True)
-        bc2.series[ci-2].graphicalProperties.solidFill = col
-    bc2.set_categories(Ref(ws3, min_col=1, min_row=3, max_row=last_pvs))
-    ws3.add_chart(bc2, 'E3')
+        // ── Step 1: File dropped / selected — preprocess immediately ────────────
+        async function parseAndStore(file) {
+            _rawFile          = file;
+            _preprocessedB64  = null;
+            _preprocessedName = null;
+            _uploadedRows     = [];
+            _uploadedHeaders  = [];
 
-    # ── Sheet 4: Daily Predictions ────────────────────────────────────────────
-    try:
-        start_dt = datetime.strptime(start_date_str, '%Y-%m-%d')
-    except Exception:
-        start_dt = datetime.now()
+            const plantType = document.getElementById('plantType').value;
+            if (!plantType) { alert('Please select a Plant Type before uploading data.'); return; }
 
-    ws5 = wb.create_sheet('Daily Predictions')
-    total_cols5 = len(results)+2
-    for ci in range(1, total_cols5+1):
-        ws5.column_dimensions[get_column_letter(ci)].width = 22
-    ws5.column_dimensions['A'].width = 16
+            await runPreprocessPipeline(file);
+        }
 
-    ws5.merge_cells(f'A1:{get_column_letter(total_cols5)}1')
-    ws5['A1'].value = f'Daily Predictions — {pdata.get("label","")}'
-    ws5['A1'].font=Font(bold=True,color='FFFFFF',size=13)
-    ws5['A1'].fill=PatternFill('solid',fgColor='0F172A')
-    ws5['A1'].alignment=CENTER; ws5.row_dimensions[1].height=30
+        function handleFileUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            const ext = file.name.split('.').pop().toLowerCase();
+            if (!['csv','xlsx','xls'].includes(ext)) {
+                alert('Unsupported file type. Please upload .xlsx, .xls, or .csv.');
+                return;
+            }
+            parseAndStore(file);
+        }
 
-    header_cols5 = ['Date'] + [f"{r['parameter']} ({r['unit']})" for r in results]
-    set_header_row(ws5, 2, header_cols5)
+        // ── Step 2: User clicks ⬇ DOWNLOAD PREPROCESSED DATA ────────────────
+        //    Always instant — data was preprocessed on drop and cached
+        async function downloadPreprocessed() {
+            if (!_rawFile) { alert('Please drop a CSV or Excel file first.'); return; }
 
-    for day_i in range(horizon+1):
-        current_date = start_dt + timedelta(days=day_i)
-        row_n = day_i + 3
-        date_cell = ws5.cell(row_n, 1, value=current_date.strftime('%Y-%m-%d'))
-        date_cell.font=Font(bold=True,size=10); date_cell.border=BORDER; date_cell.alignment=CENTER
-        for r_idx, row in enumerate(results):
-            drift   = 1 + math.sin(day_i*0.4 + r_idx*1.7)*0.05
-            day_val = round(float(row['predicted'])*drift, 4)
-            cell    = ws5.cell(row_n, r_idx+2, value=day_val)
-            cell.border=BORDER; cell.alignment=RIGHT; cell.font=Font(size=10)
-            if isinstance(day_val,float): cell.number_format='0.0000'
-        ws5.row_dimensions[row_n].height=18
+            if (_preprocessedB64 && _preprocessedName) {
+                // Already processed — download straight away from cache
+                triggerDownload(_preprocessedB64, _preprocessedName);
+            } else {
+                // Still processing (unlikely) or failed — retry
+                await runPreprocessPipeline(_rawFile);
+            }
+        }
 
-    # ── Data Log ──────────────────────────────────────────────────────────────
-    ws4 = wb.create_sheet('Data Log')
-    ws4.column_dimensions['A'].width=30; ws4.column_dimensions['B'].width=40
-    ws4.merge_cells('A1:B1')
-    ws4['A1'].value=f'Export Log — {now_str}'
-    ws4['A1'].font=Font(bold=True,size=12,color='FFFFFF')
-    ws4['A1'].fill=PatternFill('solid',fgColor='1E3A8A'); ws4['A1'].alignment=CENTER
-    ws4.row_dimensions[1].height=24
-    for i,(k,v) in enumerate([
-        ('Export Date',now_str),('Plant Type',pdata.get('label',pt)),
-        ('R² Score',metrics.get('r2','')),('RMSE',metrics.get('rmse','')),
-        ('MAE',metrics.get('mae','')),('Accuracy',f"{metrics.get('accuracy','')}%"),
-        ('Network Type',nn_cfg.get('networkType','')),
-        ('Hidden Layers',nn_cfg.get('hiddenLayers','')),
-        ('Neurons/Layer',nn_cfg.get('neuronsPerLayer','')),
-    ], 2):
-        ws4.cell(i,1).value=k; ws4.cell(i,1).font=Font(bold=True,size=10); ws4.cell(i,1).border=BORDER
-        ws4.cell(i,2).value=str(v); ws4.cell(i,2).font=Font(size=10); ws4.cell(i,2).border=BORDER
+        // ── API call ─────────────────────────────────────────────────────────
+        async function runPreprocessPipeline(file) {
+            const plantType = document.getElementById('plantType').value;
+            if (!plantType) { alert('Please select a Plant Type before uploading data.'); return; }
 
-    buf = io.BytesIO()
-    wb.save(buf); buf.seek(0)
-    _hx1 = hashlib.md5(("".join(f"{k}={v}" for k,v in sorted(params.items()))).encode()).hexdigest()[:3]
-    _sp1 = "".join(c for c in pt if c.isalnum())
-    _nw1 = datetime.now()
-    fname = f'wwtp_{_sp1}_{_nw1.strftime("%Y%m%d")}_{_nw1.strftime("%H%M%S")}_{_hx1}.xlsx'
-    return Response(buf.read(),
-                    mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                    headers={'Content-Disposition': f'attachment; filename={fname}'})
+            const btn = document.getElementById('btnDownloadPreprocessed');
+            if (btn) { btn.disabled = true; btn.textContent = '⏳ Processing…'; }
 
+            showUploadSpinner(file.name, file.size);
 
-# ── EXPORT MATLAB SCRIPT ──────────────────────────────────────────────────────
-@app.route('/api/export-mat-script', methods=['POST','OPTIONS'])
-def export_mat():
-    if request.method == 'OPTIONS': return '',200
-    d = request.get_json()
-    pt      = d.get('plantType','asp')
-    params  = d.get('params',{})
-    nn_cfg  = d.get('nnConfig',{})
-    pred    = d.get('predicted',[])
-    sel_in  = d.get('selectedInputs',[])
-    sel_out = d.get('selectedOutputs',[])
+            try {
+                const formData = new FormData();
+                formData.append('plantType', plantType);
+                formData.append('file',      file, file.name);
 
-    hash_input = ''.join(f'{k}={v}' for k, v in sorted(params.items()))
-    hex_hash   = hashlib.md5(hash_input.encode()).hexdigest()[:3]
-    safe_pt    = ''.join(c for c in pt if c.isalnum())
-    now        = datetime.now()
-    base_name  = f'wwtp_{safe_pt}_{now.strftime("%Y%m%d")}_{now.strftime("%H%M%S")}_{hex_hash}'
-    fname      = f'{base_name}.m'
+                const res  = await fetch(`${API}/preprocess`, { method: 'POST', body: formData });
+                const data = await res.json();
+                if (!data.success) throw new Error(data.error || `Server error ${res.status}`);
 
-    code = gen_matlab(pt, params, nn_cfg, pred, sel_in, sel_out, mat_basename=base_name)
-    return Response(code, mimetype='text/plain',
-                    headers={'Content-Disposition': f'attachment; filename={fname}'})
+                _preprocessedB64  = data.file;
+                _preprocessedName = data.filename;
 
+                const typeLabels = {
+                    stp_excel : '📋 STP Test Report (PMC)',
+                    scada_csv : '📡 SCADA/Generic CSV',
+                    generic   : '📊 Generic Parameter Data'
+                };
 
-if __name__ == '__main__':
-    port       = int(os.environ.get('PORT', 5000))
-    debug_mode = os.environ.get('FLASK_ENV', 'production') != 'production'
-    print('=' * 55)
-    print('  WWTP Neural Prediction System — v4.0')
-    print(f'  Server : http://localhost:{port}')
-    print(f'  Status : http://localhost:{port}/api/status')
-    print('=' * 55)
-    app.run(debug=debug_mode, port=port, host='0.0.0.0')
+                const details = [];
+                if (data.missing_filled) details.push(`${data.missing_filled} missing values filled`);
+                if (data.dupes_removed)  details.push(`${data.dupes_removed} duplicates removed`);
+
+                const label = typeLabels[data.data_type] || '📊 Preprocessed Data';
+                showUploadDone(file.name, file.size, data.rows, label, currentParams.length, data.filename);
+
+                if (details.length) {
+                    const zone2 = document.getElementById('uploadZone');
+                    const extra = document.createElement('p');
+                    extra.style.cssText = 'margin-top:6px;font-size:0.78rem;color:#1d4ed8;';
+                    extra.textContent = '✦ ' + details.join('  ·  ');
+                    zone2.appendChild(extra);
+                }
+
+                if (btn) { btn.disabled = false; btn.textContent = '⬇ DOWNLOAD PREPROCESSED DATA'; }
+
+            } catch(err) {
+                showUploadError(file.name, file.size, 0, 0, currentParams.length, err.message);
+                if (btn) { btn.disabled = false; btn.textContent = '⬇ DOWNLOAD PREPROCESSED DATA'; }
+            }
+        }
+
+        // ── Helper: decode base64 → Blob → save file ─────────────────────────
+        function triggerDownload(b64, filename) {
+            const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+            const blob  = new Blob([bytes], {
+                type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            });
+            const url = URL.createObjectURL(blob);
+            const a   = document.createElement('a');
+            a.href = url; a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+
+        // ── Upload zone states ────────────────────────────────────────────────
+        function showUploadSpinner(fileName, fileSize) {
+            const zone = document.getElementById('uploadZone');
+            zone.innerHTML = `
+                <div class="upload-icon" style="animation:spin 1s linear infinite;">⚙️</div>
+                <h3 style="color:#1e3a8a;">Preprocessing <em>${fileName}</em>…</h3>
+                <p style="color:#6b7280;margin-top:6px;">${(fileSize/1024).toFixed(1)} KB — Detecting format &amp; applying pipeline…</p>
+                <p style="margin-top:8px;font-size:0.78rem;color:#6b7280;">
+                    Mean Imputation → IQR Outlier Clamping → Min-Max Normalisation → Z-Score Standardisation
+                </p>
+                <input type="file" id="fileInput" style="display:none;" accept=".xlsx,.xls,.csv" onchange="handleFileUpload(event)">
+            `;
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  BACKEND INTEGRATION — do not change layout above
+        // ═══════════════════════════════════════════════════════════
+        const API = 'https://wwtp-app.onrender.com/api';
+        let _pred = null;   // last prediction response
+        let _metricCharts = {};  // Chart.js instances
+
+        // ── collect selected input ids ──────────────────────────
+        function getSelectedInputIds() {
+            return currentParams
+                .filter(p => { const cb = document.getElementById(`check_${p.id}`); return cb && cb.checked; })
+                .map(p => p.id);
+        }
+
+        // ── collect selected output indices ──────────────────────
+        function getSelectedOutputIdxs() {
+            const cbs = document.querySelectorAll('#outputContainer input[type="checkbox"]');
+            return Array.from(cbs).map((cb,i) => cb.checked ? i : -1).filter(i => i >= 0);
+        }
+
+        // ── collect param values ──────────────────────────────────
+        function collectParams() {
+            const pt = document.getElementById('plantType').value;
+            if (!pt) return null;
+            const params = {};
+            currentParams.forEach(p => {
+                const el = document.getElementById(`val_${p.id}`);
+                params[p.id] = el ? el.value : p.default;
+            });
+            return { plantType: pt, params };
+        }
+
+        // ── nn config ──────────────────────────────────────────────
+        function getNNConfig() {
+            return {
+                networkType:     document.getElementById('networkType').value,
+                hiddenLayers:    parseInt(document.getElementById('hiddenLayers').value) || 1,
+                neuronsPerLayer: parseInt(document.getElementById('neuronsPerLayer').value) || 10,
+                trainAlgo:       'trainlm',
+                activationFn:    'tansig',
+                maxEpochs:       1000,
+                trainRatio:      0.70,
+                valRatio:        0.15,
+            };
+        }
+
+        // ── draw network diagram directly on canvas (reliable, no html2canvas) ──
+        async function captureNetworkDiagram() {
+            try {
+                const cfg = getNNConfig();
+                const hiddenLayers   = cfg.hiddenLayers    || 1;
+                const neuronsPerLayer= cfg.neuronsPerLayer || 10;
+                const networkType    = cfg.networkType     || 'feedforward';
+                const activationFn   = cfg.activationFn   || 'tansig';
+
+                // count selected inputs/outputs
+                const nIn  = getSelectedInputIds().length  || 3;
+                const nOut = getSelectedOutputIdxs().length|| 2;
+
+                const totalLayers = 2 + hiddenLayers; // input + hidden(s) + output
+                const PAD   = 60;
+                const cw    = Math.max(900, totalLayers * 160 + PAD * 2);
+                const ch    = 420;
+
+                const canvas = document.createElement('canvas');
+                canvas.width  = cw * 2;   // 2x for retina
+                canvas.height = ch * 2;
+                const ctx = canvas.getContext('2d');
+                ctx.scale(2, 2);
+
+                // ── background ──
+                ctx.fillStyle = '#e8e8e8';
+                ctx.fillRect(0, 0, cw, ch);
+
+                // ── title bar ──
+                const grad = ctx.createLinearGradient(0,0,0,36);
+                grad.addColorStop(0,'#e0e0e0'); grad.addColorStop(1,'#c0c0c0');
+                ctx.fillStyle = grad;
+                ctx.fillRect(PAD-20, 12, cw - PAD*2 + 40, 36);
+                ctx.strokeStyle='#999'; ctx.lineWidth=1;
+                ctx.strokeRect(PAD-20, 12, cw - PAD*2 + 40, 36);
+                ctx.fillStyle='#333'; ctx.font='bold 13px Segoe UI,Arial';
+                ctx.textAlign='left'; ctx.textBaseline='middle';
+                const titles = {feedforward:'Feed Forward Neural Network (view)',
+                    patternrecognition:'Pattern Recognition Neural Network (view)',
+                    fitting:'Fitting Neural Network (view)',
+                    lstm:'LSTM Neural Network (view)',
+                    gru:'GRU Neural Network (view)',cnn:'CNN Neural Network (view)'};
+                ctx.fillText(titles[networkType]||'Neural Network (view)', PAD, 30);
+
+                // ── layer definitions ──
+                const layers = [];
+                layers.push({label:'Input', neurons: nIn, color:'#4FC3F7', dark:'#0288D1'});
+                for(let i=0;i<hiddenLayers;i++){
+                    layers.push({label:'Hidden '+(i+1), neurons: neuronsPerLayer,
+                        color:'#81C784', dark:'#388E3C', fn: activationFn});
+                }
+                layers.push({label:'Output', neurons: nOut, color:'#FF8A65', dark:'#E64A19'});
+
+                const usableW = cw - PAD*2;
+                const spacing = usableW / (layers.length - 1);
+                const centerY = (ch + 60) / 2;
+                const BOX_W=90, BOX_H=130;
+
+                const boxCenters = [];
+
+                // ── draw connectors first (behind boxes) ──
+                for(let i=0;i<layers.length-1;i++){
+                    const x1 = PAD + i * spacing + BOX_W/2;
+                    const x2 = PAD + (i+1) * spacing - BOX_W/2;
+                    const y  = centerY;
+                    // draw arrow line
+                    ctx.strokeStyle='#777'; ctx.lineWidth=2;
+                    ctx.beginPath(); ctx.moveTo(x1, y); ctx.lineTo(x2-10, y); ctx.stroke();
+                    // arrowhead
+                    ctx.fillStyle='#777';
+                    ctx.beginPath();
+                    ctx.moveTo(x2-10, y-6); ctx.lineTo(x2, y); ctx.lineTo(x2-10, y+6);
+                    ctx.closePath(); ctx.fill();
+                    // dots
+                    ctx.fillStyle='#555';
+                    ctx.beginPath(); ctx.arc(x1,y,4,0,Math.PI*2); ctx.fill();
+                    ctx.beginPath(); ctx.arc(x2,y,4,0,Math.PI*2); ctx.fill();
+                }
+
+                // ── draw layer boxes ──
+                for(let i=0;i<layers.length;i++){
+                    const lyr = layers[i];
+                    const cx2  = PAD + i * spacing;
+                    const bx  = cx2 - BOX_W/2;
+                    const by  = centerY - BOX_H/2;
+                    boxCenters.push({x:cx2, y:centerY});
+
+                    // shadow
+                    ctx.shadowColor='rgba(0,0,0,0.2)'; ctx.shadowBlur=6; ctx.shadowOffsetX=2; ctx.shadowOffsetY=2;
+
+                    // box fill gradient
+                    const bg = ctx.createLinearGradient(bx,by,bx,by+BOX_H);
+                    bg.addColorStop(0,lyr.color); bg.addColorStop(1,lyr.dark);
+                    ctx.fillStyle=bg;
+                    ctx.beginPath();
+                    ctx.roundRect ? ctx.roundRect(bx,by,BOX_W,BOX_H,8)
+                                  : ctx.rect(bx,by,BOX_W,BOX_H);
+                    ctx.fill();
+
+                    ctx.shadowColor='transparent'; ctx.shadowBlur=0;
+
+                    // box border
+                    ctx.strokeStyle=lyr.dark; ctx.lineWidth=2;
+                    ctx.beginPath();
+                    ctx.roundRect ? ctx.roundRect(bx,by,BOX_W,BOX_H,8)
+                                  : ctx.rect(bx,by,BOX_W,BOX_H);
+                    ctx.stroke();
+
+                    // label
+                    ctx.fillStyle='#fff'; ctx.font='bold 13px Segoe UI,Arial';
+                    ctx.textAlign='center'; ctx.textBaseline='middle';
+                    ctx.fillText(lyr.label, cx2, by+22);
+
+                    // W b symbols for hidden/output
+                    if(i>0){
+                        ctx.fillStyle='rgba(255,255,255,0.9)';
+                        ctx.fillRect(cx2-22, centerY-18, 18, 18);
+                        ctx.fillRect(cx2+4,  centerY-18, 18, 18);
+                        ctx.strokeStyle='rgba(0,0,0,0.3)'; ctx.lineWidth=1;
+                        ctx.strokeRect(cx2-22, centerY-18, 18, 18);
+                        ctx.strokeRect(cx2+4,  centerY-18, 18, 18);
+                        ctx.fillStyle='#333'; ctx.font='bold 11px Segoe UI,Arial';
+                        ctx.fillText('W', cx2-13, centerY-9);
+                        ctx.fillText('b',  cx2+13,  centerY-9);
+                        ctx.fillStyle='#fff'; ctx.font='18px Arial';
+                        ctx.fillText('⊕', cx2, centerY+8);
+                        ctx.font='10px Segoe UI,Arial';
+                        ctx.fillText(i<layers.length-1 ? lyr.fn||'tansig' : 'purelin', cx2, centerY+30);
+                    } else {
+                        ctx.fillStyle='#fff'; ctx.font='bold 22px Segoe UI,Arial';
+                        ctx.fillText(lyr.neurons, cx2, centerY);
+                    }
+
+                    // node count below box
+                    ctx.fillStyle='#444'; ctx.font='11px Segoe UI,Arial';
+                    ctx.fillText(i===0
+                        ? nIn+' nodes'
+                        : i===layers.length-1
+                            ? nOut+' outputs'
+                            : neuronsPerLayer+' neurons',
+                        cx2, by+BOX_H+18);
+                }
+
+                // ── final output bubble ──
+                const lastX = PAD + (layers.length-1)*spacing;
+                const bubX  = lastX + BOX_W/2 + 40;
+                if(bubX + 36 < cw){
+                    ctx.strokeStyle='#777'; ctx.lineWidth=2;
+                    ctx.beginPath(); ctx.moveTo(lastX+BOX_W/2, centerY);
+                    ctx.lineTo(bubX-18, centerY); ctx.stroke();
+                    ctx.fillStyle='#777';
+                    ctx.beginPath(); ctx.moveTo(bubX-18,centerY-6);
+                    ctx.lineTo(bubX-8,centerY); ctx.lineTo(bubX-18,centerY+6);
+                    ctx.closePath(); ctx.fill();
+                    const outGrad = ctx.createRadialGradient(bubX,centerY,2,bubX,centerY,26);
+                    outGrad.addColorStop(0,'#FFB6C1'); outGrad.addColorStop(1,'#FF69B4');
+                    ctx.fillStyle=outGrad;
+                    ctx.beginPath(); ctx.arc(bubX,centerY,26,0,Math.PI*2); ctx.fill();
+                    ctx.strokeStyle='#C71585'; ctx.lineWidth=2;
+                    ctx.beginPath(); ctx.arc(bubX,centerY,26,0,Math.PI*2); ctx.stroke();
+                    ctx.fillStyle='#fff'; ctx.font='bold 14px Segoe UI,Arial';
+                    ctx.textAlign='center'; ctx.textBaseline='middle';
+                    ctx.fillText(nOut, bubX, centerY);
+                    ctx.fillStyle='#444'; ctx.font='11px Segoe UI,Arial';
+                    ctx.fillText(nOut+' classes', bubX, centerY+42);
+                }
+
+                return canvas.toDataURL('image/png');
+            } catch(e) {
+                console.error('Diagram canvas error:', e);
+                return '';
+            }
+        }
+
+        // ── animate a single metric counter ───────────────────────
+        function animateCounter(id, target, decimals, suffix='') {
+            const el = document.getElementById(id);
+            if (!el) return;
+            let cur = 0; const steps = 60; const inc = target / steps;
+            const t = setInterval(() => {
+                cur = Math.min(cur + inc, target);
+                el.textContent = cur.toFixed(decimals) + suffix;
+                if (cur >= target) clearInterval(t);
+            }, 20);
+        }
+
+        function animateMetrics() { /* overridden below — kept for compatibility */ }
+
+        // ── render results table inside existing resultsSection ───
+        function renderResultsTable(results) {
+            const old = document.getElementById('_backendTable');
+            if (old) old.remove();
+
+            // ── build per-day data ──────────────────────────────────
+            const startDate = new Date(document.getElementById('startDate').value);
+            const horizon   = parseInt(document.getElementById('horizon').value) || 7;
+
+            // generate day-by-day predicted values (same drift as backend)
+            const days = [];
+            for (let d = 1; d <= horizon; d++) {
+                const dt = new Date(startDate);
+                dt.setDate(dt.getDate() + d);
+                const label = dt.toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'});
+                const dayRows = results.map((r, rIdx) => {
+                    const drift = 1 + Math.sin((d-1) * 0.4 + rIdx * 1.7) * 0.05;
+                    const val   = parseFloat((r.predicted * drift).toFixed(4));
+                    const std   = parseFloat(r.standard);
+                    let status;
+                    if (r.unit === '%') {
+                        status = val >= std ? 'GOOD FIT' : (val >= std*0.9 ? 'UNDERFIT MODEL' : 'OVERFIT MODEL');
+                    } else {
+                        const ratio = std ? val/std : 0;
+                        status = ratio <= 1.0 ? 'GOOD FIT' : (ratio <= 1.3 ? 'UNDERFIT MODEL' : 'OVERFIT MODEL');
+                    }
+                    return { ...r, predicted: val, status };
+                });
+                days.push({ day: d, label, rows: dayRows });
+            }
+
+            const STATUS_STYLE = {
+                'GOOD FIT':       'background:#d1fae5;color:#065f46;border:1.5px solid #6ee7b7;',
+                'UNDERFIT MODEL': 'background:#fef3c7;color:#92400e;border:1.5px solid #fcd34d;',
+                'OVERFIT MODEL':  'background:#fee2e2;color:#991b1b;border:1.5px solid #fca5a5;',
+            };
+
+            const div = document.createElement('div');
+            div.id = '_backendTable';
+            div.style.cssText = 'background:white;border-radius:16px;padding:28px;margin-top:24px;box-shadow:0 2px 12px rgba(0,0,0,0.07);';
+
+            // header
+            div.innerHTML = `
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px;">
+              <span style="font-size:1.5rem;">📅</span>
+              <h2 style="color:#1e3a8a;font-size:1.4rem;font-weight:800;margin:0;">${horizon}-Day Daily Forecast</h2>
+            </div>
+            <div style="border-bottom:2.5px solid #1e3a8a;margin-bottom:16px;"></div>
+            <p style="color:#6b7280;font-size:0.88rem;margin-bottom:6px;">Click each day tab to see the prediction table for that date.</p>
+            <p style="color:#059669;font-size:0.82rem;margin-bottom:18px;">
+              📊 Parameter trend charts &amp; overview graphs are saved in the Excel file — click <strong>Export to Excel</strong> to view them.
+            </p>
+
+            <!-- Day tabs -->
+            <div id="_dayTabs" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:20px;">
+              ${days.map((d,i) => `
+                <button onclick="switchDay(${i})" id="_tab_${i}"
+                  style="padding:10px 18px;border-radius:10px;border:1.5px solid #e5e7eb;
+                         background:${i===0?'#1e3a8a':'white'};
+                         color:${i===0?'white':'#374151'};
+                         font-weight:700;cursor:pointer;min-width:100px;text-align:center;
+                         box-shadow:${i===0?'0 2px 8px rgba(30,58,138,0.3)':'none'};">
+                  <div style="font-size:0.95rem;">Day ${d.day}</div>
+                  <div style="font-size:0.75rem;font-weight:400;opacity:0.85;">${d.label}</div>
+                </button>`).join('')}
+            </div>
+
+            <!-- Day panels -->
+            ${days.map((d,i) => `
+            <div id="_dayPanel_${i}" style="display:${i===0?'block':'none'};">
+              <div style="display:flex;justify-content:space-between;align-items:center;
+                          background:#eff6ff;border-left:4px solid #1e3a8a;
+                          border-radius:8px;padding:12px 18px;margin-bottom:16px;">
+                <span style="font-size:1rem;font-weight:700;color:#1e3a8a;">
+                  Day ${d.day} <span style="font-weight:400;color:#6b7280;margin-left:8px;">Neural Network Effluent Prediction</span>
+                </span>
+                <span style="background:#1e3a8a;color:white;border-radius:8px;
+                             padding:6px 14px;font-size:0.85rem;font-weight:600;">
+                  📅 ${d.label}
+                </span>
+              </div>
+              <table style="width:100%;border-collapse:collapse;font-size:0.9rem;">
+                <thead>
+                  <tr style="background:#1e3a8a;color:white;">
+                    <th style="padding:11px 16px;text-align:left;border-radius:6px 0 0 0;">Parameter</th>
+                    <th style="padding:11px 16px;text-align:right;">Predicted Value</th>
+                    <th style="padding:11px 16px;text-align:center;">Unit</th>
+                    <th style="padding:11px 16px;text-align:right;">Standard</th>
+                    <th style="padding:11px 16px;text-align:center;border-radius:0 6px 0 0;">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${d.rows.map((r,ri) => `
+                  <tr style="background:${ri%2===0?'#f9fafb':'white'};border-bottom:1px solid #f0f0f0;">
+                    <td style="padding:12px 16px;font-weight:600;color:#1e3a8a;">${r.parameter}</td>
+                    <td style="padding:12px 16px;text-align:right;font-weight:800;color:#2563eb;font-size:1.05rem;">${r.predicted}</td>
+                    <td style="padding:12px 16px;text-align:center;color:#6b7280;">${r.unit}</td>
+                    <td style="padding:12px 16px;text-align:right;color:#6b7280;">${r.standard}</td>
+                    <td style="padding:12px 16px;text-align:center;">
+                      <span style="${STATUS_STYLE[r.status]||'background:#f3f4f6;color:#374151;border:1px solid #d1d5db;'}
+                        padding:4px 12px;border-radius:20px;font-size:0.78rem;font-weight:800;">
+                        ${r.status}
+                      </span>
+                    </td>
+                  </tr>`).join('')}
+                </tbody>
+              </table>
+            </div>`).join('')}
+            `;
+
+            document.getElementById('resultsSection').appendChild(div);
+        }
+
+        function switchDay(idx) {
+            const horizon = parseInt(document.getElementById('horizon').value) || 7;
+            for (let i = 0; i < horizon; i++) {
+                const tab   = document.getElementById('_tab_'+i);
+                const panel = document.getElementById('_dayPanel_'+i);
+                if (!tab || !panel) continue;
+                const active = i === idx;
+                tab.style.background   = active ? '#1e3a8a' : 'white';
+                tab.style.color        = active ? 'white'   : '#374151';
+                tab.style.boxShadow    = active ? '0 2px 8px rgba(30,58,138,0.3)' : 'none';
+                tab.style.border       = active ? '1.5px solid #1e3a8a' : '1.5px solid #e5e7eb';
+                panel.style.display    = active ? 'block' : 'none';
+            }
+        }
+
+        // ── render MATLAB vs Prediction comparison charts ──────────
+        function renderMetricCharts(history) {
+            // This is called after prediction — we render comparison using _pred.results
+            renderMatlabVsPrediction(_pred ? _pred.results : []);
+        }
+
+        function renderMatlabVsPrediction(results) {
+            // Remove previous chart area if any
+            const old = document.getElementById('_metricCharts');
+            if (old) old.remove();
+
+            if (!results || results.length === 0) return;
+
+            // Destroy old comparison charts
+            Object.values(_metricCharts).forEach(c => c.destroy());
+            _metricCharts = {};
+
+            const labels   = results.map(r => r.parameter);
+            const predicted= results.map(r => parseFloat(r.predicted));
+            const matlab   = results.map(r => parseFloat(r.standard));
+            const units    = results.map(r => r.unit);
+
+            // Status colors per bar
+            const STATUS_COLOR_MAP = {
+                COMPLIANT: 'rgba(16,185,129,0.85)', PASS: 'rgba(16,185,129,0.85)',
+                MARGINAL:  'rgba(245,158,11,0.85)',
+                FAIL:      'rgba(239,68,68,0.85)',   EXCEEDANCE:'rgba(239,68,68,0.85)'
+            };
+            const barColors = results.map(r => STATUS_COLOR_MAP[r.status] || 'rgba(59,130,246,0.85)');
+
+            const div = document.createElement('div');
+            div.id = '_metricCharts';
+            div.style.cssText = 'background:white;border-radius:12px;padding:24px;margin-top:20px;';
+            div.innerHTML = `
+                <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px;padding-bottom:14px;border-bottom:2px solid #e5e7eb;">
+                    <span style="font-size:1.4rem;">📊</span>
+                    <h3 style="color:#1e3a8a;font-size:1.15rem;margin:0;">MATLAB Simulation vs Neural Network Prediction</h3>
+                </div>
+
+                <!-- Legend -->
+                <div style="display:flex;gap:24px;margin-bottom:20px;flex-wrap:wrap;align-items:center;">
+                    <div style="display:flex;align-items:center;gap:8px;">
+                        <div style="width:18px;height:18px;background:#fb923c;border-radius:4px;border:2px solid #ea580c;"></div>
+                        <span style="font-size:0.85rem;color:#374151;font-weight:600;">MATLAB Standard / Reference</span>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:8px;">
+                        <div style="width:18px;height:18px;background:#10b981;border-radius:4px;border:2px solid #059669;"></div>
+                        <span style="font-size:0.85rem;color:#374151;font-weight:600;">NN Predicted</span>
+                    </div>
+                </div>
+
+                <!-- Grouped Bar Chart -->
+                <div style="background:#f8fafc;border-radius:10px;padding:20px;margin-bottom:20px;">
+                    <h4 style="color:#374151;margin-bottom:14px;font-size:0.95rem;font-weight:700;">
+                        🔵 Side-by-Side: MATLAB Standard vs Predicted Values
+                    </h4>
+                    <canvas id="_chartCompare" height="120"></canvas>
+                </div>
+
+                <!-- Per-parameter detail cards -->
+                <h4 style="color:#374151;margin-bottom:14px;font-size:0.95rem;font-weight:700;">
+                    📌 Per-Parameter Deviation Analysis
+                </h4>
+                <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px;" id="_compCards"></div>
+
+                <!-- Error / Residual chart -->
+                <div style="background:#f8fafc;border-radius:10px;padding:20px;margin-top:20px;">
+                    <h4 style="color:#374151;margin-bottom:14px;font-size:0.95rem;font-weight:700;">
+                        📉 Prediction Error (Predicted − MATLAB Standard)
+                    </h4>
+                    <canvas id="_chartError" height="100"></canvas>
+                </div>`;
+
+            document.getElementById('resultsSection').appendChild(div);
+
+            // ─── Grouped Bar Chart ────────────────────────────────────
+            _metricCharts.compare = new Chart(document.getElementById('_chartCompare'), {
+                type: 'bar',
+                data: {
+                    labels,
+                    datasets: [
+                        {
+                            label: 'MATLAB Standard',
+                            data: matlab,
+                            backgroundColor: 'rgba(251,146,60,0.80)',
+                            borderColor: '#ea580c',
+                            borderWidth: 1.5,
+                            borderRadius: 5,
+                        },
+                        {
+                            label: 'NN Predicted',
+                            data: predicted,
+                            backgroundColor: 'rgba(16,185,129,0.82)',
+                            borderColor: '#059669',
+                            borderWidth: 1.5,
+                            borderRadius: 5,
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: {
+                        legend: { position: 'top', labels: { font: { size: 11 } } },
+                        tooltip: {
+                            callbacks: {
+                                label: (ctx) => {
+                                    const u = units[ctx.dataIndex] || '';
+                                    return ` ${ctx.dataset.label}: ${ctx.parsed.y.toFixed(3)} ${u}`;
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: { ticks: { font: { size: 11 } }, grid: { display: false } },
+                        y: { ticks: { font: { size: 11 } }, grid: { color: '#f0f0f0' },
+                             title: { display: true, text: 'Value', font: { size: 11 } } }
+                    }
+                }
+            });
+
+            // ─── Per-parameter detail cards ───────────────────────────
+            const cardsContainer = div.querySelector('#_compCards');
+            results.forEach((r, i) => {
+                const pred_v = parseFloat(r.predicted);
+                const mat_v  = parseFloat(r.standard);
+                const error  = pred_v - mat_v;
+                const errPct = mat_v !== 0 ? ((error / mat_v) * 100).toFixed(1) : '—';
+                const colorMap = { COMPLIANT:'#065f46', PASS:'#065f46', MARGINAL:'#92400e', FAIL:'#991b1b', EXCEEDANCE:'#991b1b' };
+                const bgMap    = { COMPLIANT:'#d1fae5', PASS:'#d1fae5', MARGINAL:'#fef3c7', FAIL:'#fee2e2', EXCEEDANCE:'#fee2e2' };
+                const barW = Math.min(100, Math.abs((pred_v / (mat_v || 1)) * 100));
+                const barColor = barColors[i];
+                const card = document.createElement('div');
+                card.style.cssText = 'background:#f8fafc;border-radius:10px;padding:16px;border:1px solid #e5e7eb;';
+                card.innerHTML = `
+                    <div style="font-weight:700;color:#1e3a8a;font-size:0.9rem;margin-bottom:8px;">${r.parameter}</div>
+                    <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+                        <span style="font-size:0.78rem;color:#6b7280;">MATLAB Std:</span>
+                        <span style="font-size:0.82rem;font-weight:600;color:#374151;">${mat_v.toFixed(3)} ${r.unit}</span>
+                    </div>
+                    <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+                        <span style="font-size:0.78rem;color:#6b7280;">NN Predicted:</span>
+                        <span style="font-size:0.82rem;font-weight:700;color:#2563eb;">${pred_v.toFixed(3)} ${r.unit}</span>
+                    </div>
+                    <div style="display:flex;justify-content:space-between;margin-bottom:10px;">
+                        <span style="font-size:0.78rem;color:#6b7280;">Deviation:</span>
+                        <span style="font-size:0.82rem;font-weight:600;color:${error > 0 ? '#ef4444' : '#10b981'};">${error >= 0 ? '+' : ''}${error.toFixed(3)} (${errPct}%)</span>
+                    </div>
+                    <!-- Progress bar -->
+                    <div style="background:#e5e7eb;border-radius:4px;height:8px;overflow:hidden;margin-bottom:8px;">
+                        <div style="width:${barW}%;height:100%;background:${barColor};border-radius:4px;transition:width 0.6s;"></div>
+                    </div>
+                    <div style="text-align:center;">
+                        <span style="background:${bgMap[r.status]||'#f3f4f6'};color:${colorMap[r.status]||'#374151'};
+                            border:1px solid ${colorMap[r.status]||'#374151'};
+                            padding:2px 10px;border-radius:20px;font-size:0.75rem;font-weight:700;">${r.status}</span>
+                    </div>`;
+                cardsContainer.appendChild(card);
+            });
+
+            // ─── Error/Residual Bar Chart ─────────────────────────────
+            const errors = results.map(r => parseFloat(r.predicted) - parseFloat(r.standard));
+            const errorColors = errors.map(e => e > 0 ? 'rgba(239,68,68,0.8)' : 'rgba(16,185,129,0.8)');
+
+            _metricCharts.error = new Chart(document.getElementById('_chartError'), {
+                type: 'bar',
+                data: {
+                    labels,
+                    datasets: [{
+                        label: 'Prediction Error (Predicted − Standard)',
+                        data: errors,
+                        backgroundColor: errorColors,
+                        borderColor: errorColors.map(c => c.replace('0.8','1')),
+                        borderWidth: 1.5,
+                        borderRadius: 5,
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                label: (ctx) => {
+                                    const u = units[ctx.dataIndex] || '';
+                                    return ` Error: ${ctx.parsed.y >= 0 ? '+' : ''}${ctx.parsed.y.toFixed(4)} ${u}`;
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: { ticks: { font: { size: 11 } }, grid: { display: false } },
+                        y: {
+                            ticks: { font: { size: 11 } },
+                            grid: { color: '#f0f0f0' },
+                            title: { display: true, text: 'Error (Predicted − Standard)', font: { size: 11 } }
+                        }
+                    }
+                }
+            });
+        }
+
+        // ── RUN PREDICTION ─────────────────────────────────────────
+        async function runPrediction() {
+            const collected = collectParams();
+            if (!collected || !collected.plantType) {
+                alert('Please select a plant type first.'); return;
+            }
+
+            const statusSpan = document.querySelector('.status-bar span');
+            const statusDot  = document.querySelector('.status-dot');
+            statusSpan.textContent = 'Running prediction...';
+            statusDot.style.background = '#f59e0b';
+
+            try {
+                const res = await fetch(`${API}/predict`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        plantType:       collected.plantType,
+                        params:          collected.params,
+                        nnConfig:        getNNConfig(),
+                        selectedInputs:  getSelectedInputIds(),
+                        selectedOutputs: getSelectedOutputIdxs(),
+                    })
+                });
+                if (!res.ok) throw new Error(`Server error ${res.status}`);
+                const json = await res.json();
+                if (!json.success) throw new Error(json.error || 'Prediction failed');
+
+                _pred = json;
+
+                // Show results section
+                document.getElementById('resultsSection').style.display = 'block';
+                statusSpan.textContent = 'Prediction complete! ✔';
+                statusDot.style.background = '#22c55e';
+
+                // Animate existing metric cards
+                animateCounter('r2',       json.metrics.r2,       3);
+                animateCounter('rmse',     json.metrics.rmse,     4);
+                animateCounter('mae',      json.metrics.mae,      4);
+                animateCounter('accuracy', json.metrics.accuracy, 1, '%');
+
+                // Render table + charts
+                renderResultsTable(json.results);
+                renderMetricCharts(json.metrics.history);
+
+                document.getElementById('resultsSection').scrollIntoView({ behavior: 'smooth' });
+
+            } catch (err) {
+                statusSpan.textContent = `Error: ${err.message}`;
+                statusDot.style.background = '#ef4444';
+                alert(`Prediction error: ${err.message}\n\nMake sure backend is running:\n  python app.py`);
+            }
+        }
+
+        // ── EXPORT EXCEL ───────────────────────────────────────────
+        async function exportExcel() {
+            if (!_pred) { alert('Run prediction first.'); return; }
+
+            // Capture network diagram image
+            const imgB64 = await captureNetworkDiagram();
+
+            const collected = collectParams();
+            try {
+                const res = await fetch(`${API}/export-excel`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        plantType:            _pred.plantType,
+                        params:               collected ? collected.params : {},
+                        selectedInputs:       getSelectedInputIds(),
+                        selectedOutputs:      getSelectedOutputIdxs(),
+                        results:              _pred.results,
+                        metrics:              _pred.metrics,
+                        nnConfig:             getNNConfig(),
+                        networkDiagramImage:  imgB64,
+                        startDate:            document.getElementById('startDate').value,
+                        horizon:              parseInt(document.getElementById('horizon').value) || 7,
+                    })
+                });
+                if (!res.ok) throw new Error(`Server error ${res.status}`);
+                const blob = await res.blob();
+                const url  = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                // Read the actual filename from the server's Content-Disposition header
+                const disposition = res.headers.get('Content-Disposition') || '';
+                const match = disposition.match(/filename=([^;]+)/);
+                const xlNow = new Date();
+                const xlTs = `${xlNow.getFullYear()}-${String(xlNow.getMonth()+1).padStart(2,'0')}-${String(xlNow.getDate()).padStart(2,'0')}_${String(xlNow.getHours()).padStart(2,'0')}-${String(xlNow.getMinutes()).padStart(2,'0')}-${String(xlNow.getSeconds()).padStart(2,'0')}`;
+                a.download = match ? match[1].trim() : `wwtp_${_pred.plantType}_${xlTs}.xlsx`;
+                a.click();
+                URL.revokeObjectURL(url);
+            } catch (err) {
+                alert(`Export error: ${err.message}`);
+            }
+        }
+
+        // ── EXPORT .MAT ────────────────────────────────────────────
+        async function exportMat() {
+            if (!_pred) { alert('Run prediction first.'); return; }
+            const collected = collectParams();
+            try {
+                const res = await fetch(`${API}/export-mat-script`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        plantType:      _pred.plantType,
+                        params:         collected ? collected.params : {},
+                        predicted:      _pred.predicted,
+                        nnConfig:       getNNConfig(),
+                        selectedInputs: getSelectedInputIds(),
+                        selectedOutputs:getSelectedOutputIdxs(),
+                    })
+                });
+                if (!res.ok) throw new Error(`Server error ${res.status}`);
+                const blob = await res.blob();
+                const url  = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                const disposition = res.headers.get('Content-Disposition') || '';
+                const match = disposition.match(/filename=([^;]+)/);
+                const now = new Date();
+                const ts = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}_${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}${String(now.getSeconds()).padStart(2,'0')}`;
+                a.download = match ? match[1].trim() : `wwtp_${_pred.plantType}_${ts}.m`;
+                a.click();
+                URL.revokeObjectURL(url);
+            } catch (err) {
+                alert(`MATLAB export error: ${err.message}`);
+            }
+        }
+
+        // downloadPreprocessed defined above
+        // ═══════════════════════════════════════════════════════════
+        //  END BACKEND INTEGRATION
+        // ═══════════════════════════════════════════════════════════
+
+        // Initialize on load
+        window.onload = function() {
+            updateNetwork();
+            updateOutputDate();
+        };
+
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            updateNetwork();
+        });
+
+        // Drag and drop for file upload
+        const uploadZone = document.getElementById('uploadZone');
+        uploadZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadZone.classList.add('dragover');
+        });
+        uploadZone.addEventListener('dragleave', () => {
+            uploadZone.classList.remove('dragover');
+        });
+        uploadZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadZone.classList.remove('dragover');
+            const files = e.dataTransfer.files;
+            if (files.length) handleFileUpload({ target: { files } });
+        });
+    </script>
+</body>
+</html>
