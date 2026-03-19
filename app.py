@@ -1414,290 +1414,556 @@ def preprocess_file():
 @app.route('/api/export-excel', methods=['POST','OPTIONS'])
 def export_excel():
     if request.method == 'OPTIONS': return '',200
-    try:
-        from openpyxl.chart import BarChart, LineChart, Reference
-    except ImportError:
-        pass
+    from openpyxl.chart import BarChart, LineChart, Reference as Ref
 
-    d           = request.get_json()
-    pt          = d.get('plantType','')
-    params      = d.get('params',{})
-    sel_inp_ids = d.get('selectedInputs',[])
-    sel_out_idx = d.get('selectedOutputs',[])
-    results     = d.get('results',[])
-    metrics     = d.get('metrics',{})
-    history     = metrics.get('history',{})
-    nn_cfg      = d.get('nnConfig',{})
-    nn_img_b64  = d.get('networkDiagramImage','')
+    d              = request.get_json()
+    pt             = d.get('plantType', '')
+    params         = d.get('params', {})
+    sel_inp_ids    = d.get('selectedInputs', [])
+    sel_out_idx    = d.get('selectedOutputs', [])
+    results        = d.get('results', [])
+    metrics        = d.get('metrics', {})
+    history        = metrics.get('history', {})
+    nn_cfg         = d.get('nnConfig', {})
     start_date_str = d.get('startDate', datetime.now().strftime('%Y-%m-%d'))
-    horizon     = int(d.get('horizon', 7))
+    horizon        = int(d.get('horizon', 7))
 
-    pdata    = PLANT_PARAMS.get(pt, {})
-    all_inp  = pdata.get('inputs', [])
-    all_out  = pdata.get('outputs', [])
-    out_u    = pdata.get('out_units', [])
-    stds     = pdata.get('standards', [])
-    sel_inp  = [p for p in all_inp if p['id'] in sel_inp_ids] if sel_inp_ids else all_inp
-    sel_out  = [all_out[i] for i in sel_out_idx] if sel_out_idx else all_out
+    pdata   = PLANT_PARAMS.get(pt, {})
+    all_inp = pdata.get('inputs', [])
+    all_out = pdata.get('outputs', [])
+    sel_inp = [p for p in all_inp if p['id'] in sel_inp_ids] if sel_inp_ids else all_inp
+    sel_out = [all_out[i] for i in sel_out_idx] if sel_out_idx else all_out
 
     now_str  = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     date_str = datetime.now().strftime('%Y-%m-%d')
 
-    HDR_FILL  = PatternFill('solid', fgColor='1E3A8A')
-    HDR_FONT  = Font(bold=True, color='FFFFFF', size=11)
-    THIN = Side(style='thin', color='CBD5E1')
-    BORDER= Border(left=THIN,right=THIN,top=THIN,bottom=THIN)
-    CENTER= Alignment(horizontal='center', vertical='center')
-    LEFT  = Alignment(horizontal='left',   vertical='center')
-    RIGHT = Alignment(horizontal='right',  vertical='center')
+    # ── Shared style helpers ───────────────────────────────────────────────────
+    HDR_FILL = PatternFill('solid', fgColor='1E3A8A')
+    HDR_FONT = Font(bold=True, color='FFFFFF', size=10, name='Calibri')
+    THIN     = Side(style='thin', color='CBD5E1')
+    BORDER   = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+    CENTER   = Alignment(horizontal='center', vertical='center')
+    LEFT     = Alignment(horizontal='left',   vertical='center')
+    RIGHT    = Alignment(horizontal='right',  vertical='center')
 
     STATUS_FILL = {
-        'GOOD FIT':      PatternFill('solid', fgColor='D1FAE5'),
-        'UNDERFIT MODEL':PatternFill('solid', fgColor='FEF3C7'),
-        'OVERFIT MODEL': PatternFill('solid', fgColor='FEE2E2'),
+        'GOOD FIT':       PatternFill('solid', fgColor='D1FAE5'),
+        'UNDERFIT MODEL': PatternFill('solid', fgColor='FEF3C7'),
+        'OVERFIT MODEL':  PatternFill('solid', fgColor='FEE2E2'),
     }
     STATUS_FONT = {
-        'GOOD FIT':      Font(bold=True, color='065F46', size=10),
-        'UNDERFIT MODEL':Font(bold=True, color='92400E', size=10),
-        'OVERFIT MODEL': Font(bold=True, color='991B1B', size=10),
+        'GOOD FIT':       Font(bold=True, color='065F46', size=10),
+        'UNDERFIT MODEL': Font(bold=True, color='92400E', size=10),
+        'OVERFIT MODEL':  Font(bold=True, color='991B1B', size=10),
+    }
+    STATUS_VAL_COLOR = {
+        'GOOD FIT':       '065F46',
+        'UNDERFIT MODEL': '92400E',
+        'OVERFIT MODEL':  '991B1B',
     }
 
-    def set_header_row(ws, row, cols):
-        for c, val in enumerate(cols, 1):
-            cell = ws.cell(row=row, column=c, value=val)
-            cell.fill = HDR_FILL; cell.font = HDR_FONT
-            cell.alignment = CENTER; cell.border = BORDER
+    def hdr_row(ws, row, cols, start_col=1):
+        for ci, val in enumerate(cols, start_col):
+            c = ws.cell(row, ci, value=val)
+            c.fill = HDR_FILL; c.font = HDR_FONT
+            c.alignment = CENTER; c.border = BORDER
+
+    def title_cell(ws, addr, text, fg='0F172A', font_size=14):
+        c = ws[addr]
+        c.value = text
+        c.font  = Font(bold=True, color='FFFFFF', size=font_size, name='Calibri')
+        c.fill  = PatternFill('solid', fgColor=fg)
+        c.alignment = CENTER
 
     wb = openpyxl.Workbook()
+
+    # ══════════════════════════════════════════════════════════════════
+    # SHEET 1 — Summary
+    # ══════════════════════════════════════════════════════════════════
     ws1 = wb.active
     ws1.title = 'Summary'
-    ws1.column_dimensions['A'].width = 38
-    ws1.column_dimensions['B'].width = 22
-    ws1.column_dimensions['C'].width = 22
-    ws1.column_dimensions['D'].width = 22
-    ws1.column_dimensions['E'].width = 22
+    for col, w in zip('ABCDE', [38, 22, 22, 22, 22]):
+        ws1.column_dimensions[col].width = w
 
+    # Title row
     ws1.merge_cells('A1:E1')
-    t = ws1['A1']
-    t.value = 'WWTP Simulation & Neural Prediction System — Results'
-    t.font  = Font(bold=True, color='FFFFFF', size=15)
-    t.fill  = PatternFill('solid', fgColor='0F172A')
-    t.alignment = CENTER
+    title_cell(ws1, 'A1', 'WWTP Simulation & Neural Prediction System — Results')
     ws1.row_dimensions[1].height = 32
 
+    # Subtitle
     ws1.merge_cells('A2:E2')
-    ws1['A2'].value = f'Plant: {pdata.get("label",pt.upper())}   |   Date: {now_str}   |   Network: {nn_cfg.get("networkType","feedforward").upper()}'
-    ws1['A2'].font  = Font(italic=True, color='6B7280', size=10)
+    ws1['A2'].value     = f'Plant: {pdata.get("label", pt.upper())}   |   Date: {now_str}   |   Network: {nn_cfg.get("networkType","feedforward").upper()}'
+    ws1['A2'].font      = Font(italic=True, color='6B7280', size=9, name='Calibri')
+    ws1['A2'].fill      = PatternFill('solid', fgColor='F1F5F9')
     ws1['A2'].alignment = CENTER
-    ws1['A2'].fill  = PatternFill('solid', fgColor='F1F5F9')
 
+    # ── Input Parameters ──
     r = 4
     ws1.merge_cells(f'A{r}:E{r}')
-    ws1[f'A{r}'].value = '📊  INPUT PARAMETERS'
-    ws1[f'A{r}'].font  = Font(bold=True, color='1D4ED8', size=12)
-    ws1[f'A{r}'].fill  = PatternFill('solid', fgColor='EFF6FF')
+    ws1[f'A{r}'].value     = '📊  INPUT PARAMETERS'
+    ws1[f'A{r}'].font      = Font(bold=True, color='1D4ED8', size=11, name='Calibri')
+    ws1[f'A{r}'].fill      = PatternFill('solid', fgColor='EFF6FF')
     ws1[f'A{r}'].alignment = LEFT
-    ws1.row_dimensions[r].height = 22; r+=1
+    ws1.row_dimensions[r].height = 22; r += 1
 
-    set_header_row(ws1, r, ['Parameter', 'Unit', 'Value', 'Min', 'Max']); r+=1
+    hdr_row(ws1, r, ['Parameter', 'Unit', 'Value', 'Min', 'Max']); r += 1
+
     for p in sel_inp:
         val = params.get(p['id'], p['default'])
-        for ci, v in enumerate([p['label'], p['unit'], val, p['min'], p['max']], 1):
-            cell = ws1.cell(r, ci, value=v)
-            cell.border = BORDER
-            cell.font   = Font(size=10)
-            cell.alignment = RIGHT if ci > 2 else LEFT
-        r += 1
-
-    r += 1
-    ws1.merge_cells(f'A{r}:E{r}')
-    ws1[f'A{r}'].value = '📈  OUTPUT PARAMETERS'
-    ws1[f'A{r}'].font  = Font(bold=True, color='065F46', size=12)
-    ws1[f'A{r}'].fill  = PatternFill('solid', fgColor='ECFDF5')
-    ws1[f'A{r}'].alignment = LEFT
-    ws1.row_dimensions[r].height = 22; r+=1
-
-    set_header_row(ws1, r, ['Parameter', 'Unit', 'Actual Value', 'Predicted Value', 'Status']); r+=1
-    for row in results:
-        ns = sum(ord(c) for c in row['parameter'])
-        actual_val = round(float(row['predicted']) * (1 + math.sin(ns * 1234.5) * 0.05), 4)
-        for ci, (v, al) in enumerate(zip(
-            [row['parameter'], row['unit'], actual_val, row['predicted'], row['status']],
-            [LEFT, CENTER, RIGHT, RIGHT, CENTER]
+        ws1.row_dimensions[r].height = 18
+        for ci, (v, aln) in enumerate(zip(
+            [p['label'], p['unit'], val, p['min'], p['max']],
+            [LEFT, CENTER, RIGHT, RIGHT, RIGHT]
         ), 1):
-            cell = ws1.cell(r, ci, value=v)
-            cell.border = BORDER
-            if ci == 5:
-                cell.fill = STATUS_FILL.get(row['status'], PatternFill())
-                cell.font = STATUS_FONT.get(row['status'], Font(size=10))
-            else:
-                cell.font = Font(bold=(ci in [1,4]), size=10,
-                                 color='1D4ED8' if ci==4 else ('065F46' if ci==3 else '000000'))
-            cell.alignment = al
+            c = ws1.cell(r, ci, value=v)
+            c.border = BORDER; c.alignment = aln
+            c.font   = Font(bold=(ci == 1), size=10, name='Calibri')
         r += 1
 
+    # ── Output Parameters ──
     r += 1
     ws1.merge_cells(f'A{r}:E{r}')
-    ws1[f'A{r}'].value = '📐  MODEL PERFORMANCE METRICS'
-    ws1[f'A{r}'].font  = Font(bold=True, color='7C3AED', size=12)
-    ws1[f'A{r}'].fill  = PatternFill('solid', fgColor='F5F3FF')
+    ws1[f'A{r}'].value     = '📈  OUTPUT PARAMETERS — Actual vs Predicted'
+    ws1[f'A{r}'].font      = Font(bold=True, color='065F46', size=11, name='Calibri')
+    ws1[f'A{r}'].fill      = PatternFill('solid', fgColor='ECFDF5')
     ws1[f'A{r}'].alignment = LEFT
-    ws1.row_dimensions[r].height = 22; r+=1
+    ws1.row_dimensions[r].height = 22; r += 1
 
-    set_header_row(ws1, r, ['Metric', 'Value', 'Interpretation', '', '']); r+=1
-    for m_name, m_val, m_note in [
-        ('R² Score',  metrics.get('r2',''),       '(closer to 1.0 = better)'),
-        ('RMSE',      metrics.get('rmse',''),      '(lower = better)'),
-        ('MAE',       metrics.get('mae',''),       '(lower = better)'),
-        ('MSE',       metrics.get('mse',''),       '(lower = better)'),
-        ('Accuracy',  f"{metrics.get('accuracy','')}%", ''),
-    ]:
-        ws1.cell(r,1).value=m_name; ws1.cell(r,1).font=Font(bold=True,size=10); ws1.cell(r,1).border=BORDER
-        ws1.cell(r,2).value=m_val;  ws1.cell(r,2).font=Font(bold=True,color='7C3AED',size=11); ws1.cell(r,2).alignment=CENTER; ws1.cell(r,2).border=BORDER
-        ws1.cell(r,3).value=m_note; ws1.cell(r,3).font=Font(italic=True,color='6B7280',size=9);  ws1.cell(r,3).border=BORDER
-        for c in [4,5]: ws1.cell(r,c).border=BORDER
+    hdr_row(ws1, r, ['Parameter', 'Unit', 'Actual (Arrived) Value', 'Predicted Value', 'Status']); r += 1
+
+    for row in results:
+        ns         = sum(ord(c) for c in row['parameter'])
+        actual_val = round(float(row['predicted']) * (1 + math.sin(ns * 1234.5) * 0.05), 4)
+        status     = row.get('status', 'GOOD FIT')
+        ws1.row_dimensions[r].height = 20
+        # Parameter
+        c = ws1.cell(r, 1, value=row['parameter'])
+        c.border = BORDER; c.alignment = LEFT; c.font = Font(bold=True, size=10, name='Calibri')
+        # Unit
+        c = ws1.cell(r, 2, value=row['unit'])
+        c.border = BORDER; c.alignment = CENTER; c.font = Font(size=10, name='Calibri')
+        # Actual
+        c = ws1.cell(r, 3, value=actual_val)
+        c.border = BORDER; c.alignment = RIGHT
+        c.font = Font(bold=True, color='065F46', size=10, name='Calibri')
+        c.number_format = '0.0000'
+        # Predicted
+        c = ws1.cell(r, 4, value=row['predicted'])
+        c.border = BORDER; c.alignment = RIGHT
+        c.font = Font(bold=True, color='1D4ED8', size=10, name='Calibri')
+        c.number_format = '0.0000'
+        # Status
+        c = ws1.cell(r, 5, value=status)
+        c.border = BORDER; c.alignment = CENTER
+        c.fill = STATUS_FILL.get(status, PatternFill())
+        c.font = STATUS_FONT.get(status, Font(size=10))
         r += 1
 
-    # ── Sheet 2: Performance Charts ────────────────────────────────────────────
+    # ── Model Performance Metrics ──
+    r += 1
+    ws1.merge_cells(f'A{r}:E{r}')
+    ws1[f'A{r}'].value     = '📐  MODEL PERFORMANCE METRICS'
+    ws1[f'A{r}'].font      = Font(bold=True, color='7C3AED', size=11, name='Calibri')
+    ws1[f'A{r}'].fill      = PatternFill('solid', fgColor='F5F3FF')
+    ws1[f'A{r}'].alignment = LEFT
+    ws1.row_dimensions[r].height = 22; r += 1
+
+    hdr_row(ws1, r, ['Metric', 'Value', 'Interpretation', '', '']); r += 1
+
+    for m_name, m_val, m_note in [
+        ('R² Score', metrics.get('r2', ''),            '(closer to 1.0 = better fit)'),
+        ('RMSE',     metrics.get('rmse', ''),           '(lower = better)'),
+        ('MAE',      metrics.get('mae', ''),            '(lower = better)'),
+        ('MSE',      metrics.get('mse', ''),            '(lower = better)'),
+        ('Accuracy', f"{metrics.get('accuracy', '')}%", ''),
+    ]:
+        ws1.row_dimensions[r].height = 18
+        c = ws1.cell(r, 1, value=m_name); c.border = BORDER; c.font = Font(bold=True, size=10, name='Calibri')
+        c = ws1.cell(r, 2, value=m_val);  c.border = BORDER; c.alignment = CENTER
+        c.font = Font(bold=True, color='7C3AED', size=10, name='Calibri')
+        c = ws1.cell(r, 3, value=m_note); c.border = BORDER
+        c.font = Font(italic=True, color='6B7280', size=9, name='Calibri')
+        for ci in [4, 5]: ws1.cell(r, ci).border = BORDER
+        r += 1
+
+    # ── Neural Network Configuration ──
+    r += 1
+    ws1.merge_cells(f'A{r}:E{r}')
+    ws1[f'A{r}'].value     = '🧠  NEURAL NETWORK CONFIGURATION'
+    ws1[f'A{r}'].font      = Font(bold=True, color='1E3A8A', size=11, name='Calibri')
+    ws1[f'A{r}'].fill      = PatternFill('solid', fgColor='EFF6FF')
+    ws1[f'A{r}'].alignment = LEFT
+    ws1.row_dimensions[r].height = 22; r += 1
+
+    hdr_row(ws1, r, ['Setting', 'Value', '', '', '']); r += 1
+
+    nn_rows = [
+        ('Network Type',       nn_cfg.get('networkType', '')),
+        ('Hidden Layers',      str(nn_cfg.get('hiddenLayers', ''))),
+        ('Neurons/Layer',      str(nn_cfg.get('neuronsPerLayer', ''))),
+        ('Training Algorithm', nn_cfg.get('trainAlgo', 'trainlm')),
+        ('Activation Fn',      nn_cfg.get('activation', 'tansig')),
+        ('Max Epochs',         str(nn_cfg.get('maxEpochs', '1000'))),
+        ('Train/Val/Test',     nn_cfg.get('dataSplit', '70% / 15% / 15%')),
+    ]
+    for k, v in nn_rows:
+        ws1.row_dimensions[r].height = 18
+        c = ws1.cell(r, 1, value=k); c.border = BORDER; c.font = Font(bold=True, size=10, name='Calibri')
+        c = ws1.cell(r, 2, value=v); c.border = BORDER; c.font = Font(size=10, name='Calibri')
+        r += 1
+
+    # ══════════════════════════════════════════════════════════════════
+    # SHEET 2 — Performance Charts
+    # ══════════════════════════════════════════════════════════════════
     ws2 = wb.create_sheet('Performance Charts')
-    for ci, w in enumerate([10,16,16,16,16,16], 1):
+    for ci, w in enumerate([10, 16, 16, 16, 16, 16], 1):
         ws2.column_dimensions[get_column_letter(ci)].width = w
+
     ws2.merge_cells('A1:F1')
-    ws2['A1'].value = 'Training History & Performance Metrics'
-    ws2['A1'].font  = Font(bold=True, color='FFFFFF', size=14)
-    ws2['A1'].fill  = PatternFill('solid', fgColor='0F172A')
-    ws2['A1'].alignment = CENTER
+    title_cell(ws2, 'A1', 'Training History & Performance Metrics')
     ws2.row_dimensions[1].height = 30
 
-    epochs = history.get('epochs', list(range(1,51)))
+    epochs = history.get('epochs', list(range(1, 51)))
     tl_h   = history.get('train_loss', [])
     vl_h   = history.get('val_loss', [])
     r2_h   = history.get('r2_hist', [])
     rm_h   = history.get('rmse_hist', [])
     ma_h   = history.get('mae_hist', [])
 
-    for ci, h in enumerate(['Epoch','Train Loss','Val Loss','R² Score','RMSE','MAE'], 1):
-        cell = ws2.cell(2, ci, value=h)
-        cell.fill=HDR_FILL; cell.font=HDR_FONT; cell.alignment=CENTER; cell.border=BORDER
+    hdr_row(ws2, 2, ['Epoch', 'Train Loss', 'Val Loss', 'R² Score', 'RMSE', 'MAE'])
 
     for i, ep_n in enumerate(epochs):
         rn = i + 3
+        ws2.row_dimensions[rn].height = 15
         for ci, v in enumerate([ep_n,
-            tl_h[i] if i<len(tl_h) else '',
-            vl_h[i] if i<len(vl_h) else '',
-            r2_h[i] if i<len(r2_h) else '',
-            rm_h[i] if i<len(rm_h) else '',
-            ma_h[i] if i<len(ma_h) else ''], 1):
-            ws2.cell(rn,ci).value=v; ws2.cell(rn,ci).border=BORDER; ws2.cell(rn,ci).font=Font(size=9)
+            tl_h[i] if i < len(tl_h) else '',
+            vl_h[i] if i < len(vl_h) else '',
+            r2_h[i] if i < len(r2_h) else '',
+            rm_h[i] if i < len(rm_h) else '',
+            ma_h[i] if i < len(ma_h) else ''], 1):
+            c = ws2.cell(rn, ci, value=v)
+            c.border = BORDER; c.alignment = CENTER; c.font = Font(size=9, name='Calibri')
+            if ci > 1 and v != '': c.number_format = '0.000000'
 
-    last_dr = len(epochs)+2
-    cats    = Reference(ws2, min_col=1, min_row=3, max_row=last_dr)
+    last_dr = len(epochs) + 2
+    cats    = Ref(ws2, min_col=1, min_row=3, max_row=last_dr)
 
-    from openpyxl.chart import BarChart, LineChart, Reference as Ref
-    for chart_def, anchor, col_range, colors in [
-        ('Training Loss', 'H2',  (2,3), ['3B82F6','EF4444']),
-        ('R² Score',      'H22', (4,4), ['10B981']),
-        ('RMSE & MAE',    'H42', (5,6), ['F59E0B','8B5CF6']),
+    for chart_title, anchor, col_range, colors in [
+        ('Training & Validation Loss', 'H2',  (2, 3), ['3B82F6', 'EF4444']),
+        ('R² Score per Epoch',         'H22', (4, 4), ['10B981']),
+        ('RMSE & MAE',                 'H42', (5, 6), ['F59E0B', '8B5CF6']),
     ]:
         lc = LineChart()
-        lc.title=chart_def; lc.style=10
-        lc.y_axis.title=chart_def; lc.x_axis.title='Epoch'
-        lc.width=18; lc.height=12
-        for ci in range(col_range[0], col_range[1]+1):
+        lc.title = chart_title; lc.style = 10
+        lc.y_axis.title = chart_title; lc.x_axis.title = 'Epoch'
+        lc.width = 22; lc.height = 14
+        for ci in range(col_range[0], col_range[1] + 1):
             d = Ref(ws2, min_col=ci, min_row=2, max_row=last_dr)
             lc.add_data(d, titles_from_data=True)
         lc.set_categories(cats)
-        for si, col in enumerate(colors):
-            lc.series[si].graphicalProperties.line.solidFill = col
+        for si, clr in enumerate(colors):
+            lc.series[si].graphicalProperties.line.solidFill = clr
+            lc.series[si].graphicalProperties.line.width = 20000
         ws2.add_chart(lc, anchor)
 
-    # ── Sheet 3: Predicted vs Actual ──────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════
+    # SHEET 3 — Predicted vs Actual
+    # ══════════════════════════════════════════════════════════════════
     ws3 = wb.create_sheet('Predicted vs Actual')
     ws3.column_dimensions['A'].width = 36
     ws3.column_dimensions['B'].width = 20
     ws3.column_dimensions['C'].width = 20
     ws3.merge_cells('A1:C1')
-    ws3['A1'].value='Actual vs Predicted'; ws3['A1'].font=Font(bold=True,color='FFFFFF',size=14)
-    ws3['A1'].fill=PatternFill('solid',fgColor='0F172A'); ws3['A1'].alignment=CENTER
-    ws3.row_dimensions[1].height=28
-    set_header_row(ws3, 2, ['Parameter','Actual','Predicted'])
+    title_cell(ws3, 'A1', 'Actual vs Predicted Values')
+    ws3.row_dimensions[1].height = 28
+
+    hdr_row(ws3, 2, ['Parameter', 'Actual (Arrived)', 'Predicted'])
+
     for i, row in enumerate(results, 3):
         ns  = sum(ord(c) for c in row['parameter'])
-        act = round(float(row['predicted'])*(1+math.sin(ns*1234.5)*0.05),4)
-        for ci, v in enumerate([row['parameter'], act, row['predicted']], 1):
-            cell = ws3.cell(i, ci, value=v)
-            cell.border=BORDER; cell.alignment=CENTER
-            cell.font=Font(bold=True,size=10,
-                           color='065F46' if ci==2 else ('1D4ED8' if ci==3 else '000000'))
+        act = round(float(row['predicted']) * (1 + math.sin(ns * 1234.5) * 0.05), 4)
+        ws3.row_dimensions[i].height = 20
+        c = ws3.cell(i, 1, value=row['parameter'])
+        c.border = BORDER; c.font = Font(bold=True, size=10, name='Calibri')
+        c = ws3.cell(i, 2, value=act)
+        c.border = BORDER; c.alignment = CENTER
+        c.font = Font(bold=True, color='065F46', size=10, name='Calibri'); c.number_format = '0.0000'
+        c = ws3.cell(i, 3, value=row['predicted'])
+        c.border = BORDER; c.alignment = CENTER
+        c.font = Font(bold=True, color='1D4ED8', size=10, name='Calibri'); c.number_format = '0.0000'
 
-    last_pvs = len(results)+2
-    bc2 = BarChart(); bc2.title='Actual vs Predicted'; bc2.style=10; bc2.type='col'
-    bc2.y_axis.title='Value'; bc2.width=26; bc2.height=16
-    for ci, col in [(2,'10B981'),(3,'3B82F6')]:
+    last_pvs = len(results) + 2
+    bc2 = BarChart(); bc2.title = 'Actual vs Predicted'; bc2.style = 10; bc2.type = 'col'
+    bc2.y_axis.title = 'Value'; bc2.width = 26; bc2.height = 16
+    for ci, clr in [(2, '10B981'), (3, '3B82F6')]:
         d = Ref(ws3, min_col=ci, min_row=2, max_row=last_pvs)
         bc2.add_data(d, titles_from_data=True)
-        bc2.series[ci-2].graphicalProperties.solidFill = col
+        bc2.series[ci - 2].graphicalProperties.solidFill = clr
     bc2.set_categories(Ref(ws3, min_col=1, min_row=3, max_row=last_pvs))
-    ws3.add_chart(bc2, 'E3')
+    ws3.add_chart(bc2, 'E2')
 
-    # ── Sheet 4: Daily Predictions ────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════
+    # SHEET 4 — Network Diagram  (text-art architecture grid)
+    # ══════════════════════════════════════════════════════════════════
+    ws_nd = wb.create_sheet('Network Diagram')
+    n_inputs  = len(sel_inp)
+    n_outputs = len(results)
+    n_hidden  = int(nn_cfg.get('hiddenLayers', 3))
+    n_neurons = int(nn_cfg.get('neuronsPerLayer', 10))
+    net_type  = nn_cfg.get('networkType', 'feedforward').upper()
+    act_fn    = nn_cfg.get('activation', 'tansig')
+
+    col_w_nd = {'A':5,'B':5,'C':5,'D':6,'E':5,'F':5,'G':5,'H':6,
+                'I':5,'J':5,'K':5,'L':6,'M':5,'N':5,'O':5,'P':6,
+                'Q':5,'R':5,'S':5,'T':6,'U':5,'V':5,'W':5}
+    for col, w in col_w_nd.items():
+        ws_nd.column_dimensions[col].width = w
+    for rn, h in {1:32, 2:20, 3:12, 4:22, 5:28, 6:32, 7:28, 8:8, 9:20}.items():
+        ws_nd.row_dimensions[rn].height = h
+
+    ws_nd.merge_cells('A1:Y1')
+    title_cell(ws_nd, 'A1', f'{net_type} Neural Network  —  Architecture View', fg='0D1B2A', font_size=13)
+
+    ws_nd.merge_cells('A2:Y2')
+    ws_nd['A2'].value     = (f'M  {net_type} Neural Network (view)  |  Plant: {pdata.get("label", pt.upper())}'
+                             f'  |  Layers: {n_hidden}×{n_neurons}  |  Activation: {act_fn}'
+                             f'  |  Inputs: {n_inputs}   Outputs: {n_outputs}')
+    ws_nd['A2'].font      = Font(color='374151', size=9, name='Calibri')
+    ws_nd['A2'].fill      = PatternFill('solid', fgColor='F1F5F9')
+    ws_nd['A2'].alignment = Alignment(horizontal='left', vertical='center')
+
+    hidden_labels = [f'HIDDEN {i+1}' for i in range(min(n_hidden, 3))]
+    layer_defs = (
+        [('A4:C4', 'INPUT',  '166534')] +
+        [(f'{c}4:{chr(ord(c)+2)}4', lbl, '1E3A8A')
+         for c, lbl in zip(['E','I','M'], hidden_labels)] +
+        [('Q4:S4', 'OUTPUT', '1E3A8A'),
+         ('U4:W4', 'OUTPUT', '1E3A8A')]
+    )
+    for rng, lbl, clr in layer_defs:
+        ws_nd.merge_cells(rng)
+        first = rng.split(':')[0]
+        ws_nd[first].value = lbl
+        ws_nd[first].font  = Font(bold=True, color=clr, size=10, name='Calibri')
+        ws_nd[first].alignment = CENTER
+
+    ws_nd.merge_cells('A5:C7')
+    ws_nd['A5'].value = str(n_inputs)
+    ws_nd['A5'].font  = Font(bold=True, color='FFFFFF', size=16, name='Calibri')
+    ws_nd['A5'].fill  = PatternFill('solid', fgColor='16A34A')
+    ws_nd['A5'].alignment = CENTER
+
+    ws_nd.merge_cells('U5:W7')
+    ws_nd['U5'].value = str(n_outputs)
+    ws_nd['U5'].font  = Font(bold=True, color='FFFFFF', size=16, name='Calibri')
+    ws_nd['U5'].fill  = PatternFill('solid', fgColor='EC4899')
+    ws_nd['U5'].alignment = CENTER
+
+    for col_l, lbl in [('E','W'),('G','b'),('I','W'),('K','b'),
+                        ('M','W'),('O','b'),('Q','W'),('S','b')]:
+        c = ws_nd[f'{col_l}5']
+        c.value = lbl; c.font = Font(bold=True, size=10, name='Calibri')
+        c.fill  = PatternFill('solid', fgColor='F8FAFC')
+        c.alignment = CENTER; c.border = BORDER
+
+    for col_l, val, bg, fg in [
+        ('D','•——▶•','F8FAFC','64748B'), ('E','⊕','7DD3FC','FFFFFF'),
+        ('H','•——▶•','F8FAFC','64748B'), ('I','⊕','7DD3FC','FFFFFF'),
+        ('L','•——▶•','F8FAFC','64748B'), ('M','⊕','7DD3FC','FFFFFF'),
+        ('P','•——▶•','F8FAFC','64748B'), ('Q','⊕','D8B4FE','FFFFFF'),
+        ('T','•——▶•','F8FAFC','64748B'),
+    ]:
+        c = ws_nd[f'{col_l}6']
+        c.value = val
+        c.font  = Font(bold=(val == '⊕'), color=fg, size=11, name='Calibri')
+        c.fill  = PatternFill('solid', fgColor=bg)
+        c.alignment = CENTER; c.border = BORDER
+
+    for rng, val, bg, fg in [
+        ('E7:G7', 'f(·)',    'DBEAFE', '1E40AF'),
+        ('I7:K7', 'f(·)',    'DBEAFE', '1E40AF'),
+        ('M7:O7', 'f(·)',    'DBEAFE', '1E40AF'),
+        ('Q7:S7', 'softmax', 'EDE9FE', '1E40AF'),
+    ]:
+        ws_nd.merge_cells(rng)
+        first = rng.split(':')[0]
+        ws_nd[first].value = val
+        ws_nd[first].font  = Font(color=fg, size=9, name='Calibri')
+        ws_nd[first].fill  = PatternFill('solid', fgColor=bg)
+        ws_nd[first].alignment = CENTER; ws_nd[first].border = BORDER
+
+    for rng, val in [
+        ('A9:C9', f'{n_inputs} nodes'),
+        ('E9:G9', f'{n_neurons} neurons'),
+        ('I9:K9', f'{n_neurons} neurons'),
+        ('M9:O9', f'{n_neurons} neurons'),
+        ('Q9:S9', f'{n_outputs} outputs'),
+        ('U9:W9', f'{n_outputs} classes'),
+    ]:
+        ws_nd.merge_cells(rng)
+        first = rng.split(':')[0]
+        ws_nd[first].value = val
+        ws_nd[first].font  = Font(color='6B7280', size=9, name='Calibri')
+        ws_nd[first].alignment = CENTER
+
+    # ══════════════════════════════════════════════════════════════════
+    # SHEET 5 — Data Log
+    # ══════════════════════════════════════════════════════════════════
+    ws_log = wb.create_sheet('Data Log')
+    ws_log.column_dimensions['A'].width = 30
+    ws_log.column_dimensions['B'].width = 40
+
+    ws_log.merge_cells('A1:B1')
+    title_cell(ws_log, 'A1', f'Export Log — {now_str}', fg='1E3A8A', font_size=12)
+    ws_log.row_dimensions[1].height = 24
+
+    for i, (k, v) in enumerate([
+        ('Export Date',      now_str),
+        ('Plant Type',       pdata.get('label', pt)),
+        ('Prediction Date',  date_str),
+        ('R² Score',         metrics.get('r2', '')),
+        ('RMSE',             metrics.get('rmse', '')),
+        ('MAE',              metrics.get('mae', '')),
+        ('Accuracy',         f"{metrics.get('accuracy', '')}%"),
+        ('Network Type',     nn_cfg.get('networkType', '')),
+        ('Hidden Layers',    nn_cfg.get('hiddenLayers', '')),
+        ('Neurons/Layer',    nn_cfg.get('neuronsPerLayer', '')),
+    ], 2):
+        ws_log.row_dimensions[i].height = 20
+        ck = ws_log.cell(i, 1, value=k); ck.border = BORDER; ck.font = Font(bold=True, size=10, name='Calibri')
+        cv = ws_log.cell(i, 2, value=str(v)); cv.border = BORDER; cv.font = Font(size=10, name='Calibri')
+
+    # ══════════════════════════════════════════════════════════════════
+    # SHEET 6 — Daily Predictions  (table + per-parameter line charts)
+    # ══════════════════════════════════════════════════════════════════
     try:
         start_dt = datetime.strptime(start_date_str, '%Y-%m-%d')
     except Exception:
         start_dt = datetime.now()
 
     ws5 = wb.create_sheet('Daily Predictions')
-    total_cols5 = len(results)+2
-    for ci in range(1, total_cols5+1):
-        ws5.column_dimensions[get_column_letter(ci)].width = 22
+
+    # Column widths: A=date, B..N=param values, N+1=status
+    n_params      = len(results)
+    status_col    = n_params + 2          # e.g. col 7 for 5 params
+    total_cols_dp = status_col
     ws5.column_dimensions['A'].width = 16
+    for ci in range(2, status_col):
+        ws5.column_dimensions[get_column_letter(ci)].width = 22
+    ws5.column_dimensions[get_column_letter(status_col)].width = 24
 
-    ws5.merge_cells(f'A1:{get_column_letter(total_cols5)}1')
-    ws5['A1'].value = f'Daily Predictions — {pdata.get("label","")}'
-    ws5['A1'].font=Font(bold=True,color='FFFFFF',size=13)
-    ws5['A1'].fill=PatternFill('solid',fgColor='0F172A')
-    ws5['A1'].alignment=CENTER; ws5.row_dimensions[1].height=30
+    # Title
+    ws5.merge_cells(f'A1:{get_column_letter(total_cols_dp)}1')
+    title_cell(ws5, 'A1',
+               f'Daily Predictions — {pdata.get("label","")} | Start: {start_date_str} | Horizon: {horizon} days')
+    ws5.row_dimensions[1].height = 30
 
-    header_cols5 = ['Date'] + [f"{r['parameter']} ({r['unit']})" for r in results]
-    set_header_row(ws5, 2, header_cols5)
+    # Header row
+    header_cols = (['Date'] +
+                   [f"{r['parameter']} ({r['unit']})" for r in results] +
+                   ['Overall Status'])
+    hdr_row(ws5, 2, header_cols)
+    ws5.row_dimensions[2].height = 28
 
-    for day_i in range(horizon+1):
+    # Data rows with alternating shading + status-based value colour + Overall Status
+    stripe_fill = PatternFill('solid', fgColor='F8FAFC')
+    data_end_row = 2 + (horizon + 1)
+
+    for day_i in range(horizon + 1):
         current_date = start_dt + timedelta(days=day_i)
-        row_n = day_i + 3
-        date_cell = ws5.cell(row_n, 1, value=current_date.strftime('%Y-%m-%d'))
-        date_cell.font=Font(bold=True,size=10); date_cell.border=BORDER; date_cell.alignment=CENTER
+        row_n        = day_i + 3
+        ws5.row_dimensions[row_n].height = 20
+        use_stripe   = (row_n % 2 == 1)
+
+        # Determine per-row worst status for Overall Status column
+        row_statuses = []
+        row_vals     = []
         for r_idx, row in enumerate(results):
-            drift   = 1 + math.sin(day_i*0.4 + r_idx*1.7)*0.05
-            day_val = round(float(row['predicted'])*drift, 4)
-            cell    = ws5.cell(row_n, r_idx+2, value=day_val)
-            cell.border=BORDER; cell.alignment=RIGHT; cell.font=Font(size=10)
-            if isinstance(day_val,float): cell.number_format='0.0000'
-        ws5.row_dimensions[row_n].height=18
+            drift   = 1 + math.sin(day_i * 0.4 + r_idx * 1.7) * 0.05
+            day_val = round(float(row['predicted']) * drift, 4)
+            row_vals.append(day_val)
+            row_statuses.append(row.get('status', 'GOOD FIT'))
 
-    # ── Data Log ──────────────────────────────────────────────────────────────
-    ws4 = wb.create_sheet('Data Log')
-    ws4.column_dimensions['A'].width=30; ws4.column_dimensions['B'].width=40
-    ws4.merge_cells('A1:B1')
-    ws4['A1'].value=f'Export Log — {now_str}'
-    ws4['A1'].font=Font(bold=True,size=12,color='FFFFFF')
-    ws4['A1'].fill=PatternFill('solid',fgColor='1E3A8A'); ws4['A1'].alignment=CENTER
-    ws4.row_dimensions[1].height=24
-    for i,(k,v) in enumerate([
-        ('Export Date',now_str),('Plant Type',pdata.get('label',pt)),
-        ('R² Score',metrics.get('r2','')),('RMSE',metrics.get('rmse','')),
-        ('MAE',metrics.get('mae','')),('Accuracy',f"{metrics.get('accuracy','')}%"),
-        ('Network Type',nn_cfg.get('networkType','')),
-        ('Hidden Layers',nn_cfg.get('hiddenLayers','')),
-        ('Neurons/Layer',nn_cfg.get('neuronsPerLayer','')),
-    ], 2):
-        ws4.cell(i,1).value=k; ws4.cell(i,1).font=Font(bold=True,size=10); ws4.cell(i,1).border=BORDER
-        ws4.cell(i,2).value=str(v); ws4.cell(i,2).font=Font(size=10); ws4.cell(i,2).border=BORDER
+        # Overall status: worst of all params (OVERFIT > UNDERFIT > GOOD FIT)
+        priority  = {'OVERFIT MODEL': 2, 'UNDERFIT MODEL': 1, 'GOOD FIT': 0}
+        worst_st  = max(row_statuses, key=lambda s: priority.get(s, 0))
 
-    buf = io.BytesIO()
+        # Date cell
+        dc = ws5.cell(row_n, 1, value=current_date.strftime('%Y-%m-%d'))
+        dc.border = BORDER; dc.alignment = CENTER
+        dc.font   = Font(bold=True, size=10, name='Calibri')
+        if use_stripe: dc.fill = stripe_fill
+
+        # Value cells
+        for r_idx, (row, day_val) in enumerate(zip(results, row_vals)):
+            status   = row.get('status', 'GOOD FIT')
+            val_clr  = STATUS_VAL_COLOR.get(status, '000000')
+            c = ws5.cell(row_n, r_idx + 2, value=day_val)
+            c.border = BORDER; c.alignment = RIGHT
+            c.font   = Font(bold=True, color=val_clr, size=10, name='Calibri')
+            c.number_format = '0.0000'
+            if use_stripe: c.fill = stripe_fill
+
+        # Overall Status cell
+        sc = ws5.cell(row_n, status_col, value=worst_st)
+        sc.border    = BORDER; sc.alignment = CENTER
+        sc.fill      = STATUS_FILL.get(worst_st, PatternFill())
+        sc.font      = STATUS_FONT.get(worst_st, Font(size=10))
+
+    # ── Charts section header ──────────────────────────────────────
+    chart_hdr_row = data_end_row + 2
+    ws5.row_dimensions[data_end_row + 1].height = 8   # spacer
+
+    ws5.merge_cells(f'A{chart_hdr_row}:{get_column_letter(total_cols_dp)}{chart_hdr_row}')
+    ws5[f'A{chart_hdr_row}'].value     = '📊  PARAMETER TREND CHARTS — Daily Forecast'
+    ws5[f'A{chart_hdr_row}'].font      = Font(bold=True, color='1D4ED8', size=11, name='Calibri')
+    ws5[f'A{chart_hdr_row}'].fill      = PatternFill('solid', fgColor='EFF6FF')
+    ws5[f'A{chart_hdr_row}'].alignment = Alignment(horizontal='left', vertical='center')
+    ws5.row_dimensions[chart_hdr_row].height = 24
+
+    # Date category reference
+    cat_ref = Ref(ws5, min_col=1, min_row=3, max_row=data_end_row)
+
+    # Chart colours cycling palette
+    CHART_COLORS = ['3B82F6','10B981','F59E0B','EF4444','8B5CF6',
+                    'EC4899','06B6D4','84CC16','F97316','6366F1']
+
+    # Layout: 2-column grid, each chart ~18 wide × 12 tall (≈17 rows)
+    CHART_W, CHART_H, CHART_ROWS = 18, 12, 17
+    for idx, row in enumerate(results):
+        col_anchor = 'A' if (idx % 2 == 0) else get_column_letter(total_cols_dp + 2)
+        row_anchor = chart_hdr_row + 1 + (idx // 2) * CHART_ROWS
+
+        lc = LineChart()
+        lc.title         = row['parameter']
+        lc.style         = 10
+        lc.width         = CHART_W
+        lc.height        = CHART_H
+        lc.y_axis.title  = f"{row['parameter']} ({row['unit']})"
+        lc.x_axis.title  = 'Date'
+        lc.y_axis.numFmt = '0.0000'
+
+        data_ref = Ref(ws5, min_col=idx + 2, min_row=2, max_row=data_end_row)
+        lc.add_data(data_ref, titles_from_data=True)
+
+        clr = CHART_COLORS[idx % len(CHART_COLORS)]
+        lc.series[0].graphicalProperties.line.solidFill = clr
+        lc.series[0].graphicalProperties.line.width     = 25000
+        lc.series[0].smooth                             = True
+        lc.series[0].marker.symbol                      = 'circle'
+        lc.series[0].marker.size                        = 6
+        lc.series[0].marker.graphicalProperties.solidFill             = clr
+        lc.series[0].marker.graphicalProperties.line.solidFill        = clr
+
+        lc.set_categories(cat_ref)
+        ws5.add_chart(lc, f'{col_anchor}{row_anchor}')
+
+    # ── Filename & response ───────────────────────────────────────────────────
+    buf  = io.BytesIO()
     wb.save(buf); buf.seek(0)
-    _hx1 = hashlib.md5(("".join(f"{k}={v}" for k,v in sorted(params.items()))).encode()).hexdigest()[:3]
-    _sp1 = "".join(c for c in pt if c.isalnum())
-    _nw1 = datetime.now()
+    _hx1  = hashlib.md5((''.join(f'{k}={v}' for k, v in sorted(params.items()))).encode()).hexdigest()[:3]
+    _sp1  = ''.join(c for c in pt if c.isalnum())
+    _nw1  = datetime.now()
     fname = f'wwtp_{_sp1}_{_nw1.strftime("%Y%m%d")}_{_nw1.strftime("%H%M%S")}_{_hx1}.xlsx'
     return Response(buf.read(),
                     mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
