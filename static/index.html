@@ -597,8 +597,6 @@
                     <option value="asp">Activated Sludge Process (ASP)</option>
                     <option value="mbr">Membrane Bioreactor (MBR)</option>
                     <option value="sbr">Sequencing Batch Reactor (SBR)</option>
-                    <option value="mle">Modified Ludzack-Ettinger (MLE)</option>
-                    <option value="bardenpho">Bardenpho Process</option>
                 </select>
             </div>
             
@@ -848,18 +846,6 @@
                 { id: 'fill_time', label: 'Fill Time', unit: 'h', default: 2, min: 0.5, max: 3 },
                 { id: 'react_time', label: 'React Time', unit: 'h', default: 4, min: 2, max: 8 },
                 { id: 'do', label: 'Dissolved Oxygen', unit: 'mg/L', default: 2.0, min: 0.5, max: 4.0 }
-            ],
-            mle: [
-                { id: 'cod_inf', label: 'COD Influent', unit: 'mg/L', default: 450, min: 100, max: 1000 },
-                { id: 'tn_inf', label: 'Total Nitrogen', unit: 'mg/L', default: 60, min: 20, max: 120 },
-                { id: 'internal_recycle', label: 'Internal Recycle Ratio', unit: '%', default: 200, min: 100, max: 400 },
-                { id: 'sludge_recycle', label: 'Sludge Recycle Ratio', unit: '%', default: 50, min: 25, max: 100 }
-            ],
-            bardenpho: [
-                { id: 'cod_inf', label: 'COD Influent', unit: 'mg/L', default: 500, min: 100, max: 1200 },
-                { id: 'tp_inf', label: 'Total Phosphorus', unit: 'mg/L', default: 8, min: 2, max: 20 },
-                { id: 'stages', label: 'Anoxic Stages', unit: 'count', default: 2, min: 1, max: 3 },
-                { id: 'anaerobic_hrt', label: 'Anaerobic HRT', unit: 'h', default: 1.5, min: 0.5, max: 3 }
             ]
         };
 
@@ -867,8 +853,6 @@
             asp: ['COD Effluent', 'BOD Effluent', 'TSS Effluent', 'NH3-N Effluent', 'Sludge Volume Index'],
             mbr: ['COD Effluent', 'BOD Effluent', 'NH3-N Effluent', 'TMP Trend', 'Fouling Rate'],
             sbr: ['COD Effluent', 'BOD Effluent', 'Cycle Efficiency', 'Denitrification Rate'],
-            mle: ['TN Effluent', 'NH3-N Effluent', 'NO3-N Effluent', 'Denitrification Efficiency'],
-            bardenpho: ['TP Effluent', 'PO4-P Effluent', 'COD Effluent', 'Nitrogen Removal', 'Phosphorus Removal']
         };
 
 
@@ -1633,6 +1617,90 @@
             document.getElementById('resultsSection').appendChild(div);
         }
 
+        function renderEfficiency(efficiencies) {
+            // Remove previous efficiency panel if any
+            const old = document.getElementById('_efficiencyPanel');
+            if (old) old.remove();
+            if (!efficiencies || efficiencies.length === 0) return;
+
+            const STATUS_STYLE = {
+                'GOOD':     'background:#d1fae5;color:#065f46;border:1.5px solid #6ee7b7;',
+                'MODERATE': 'background:#fef3c7;color:#92400e;border:1.5px solid #fcd34d;',
+                'LOW':      'background:#fee2e2;color:#991b1b;border:1.5px solid #fca5a5;',
+            };
+            const STATUS_ICON = { 'GOOD': '✅', 'MODERATE': '⚠️', 'LOW': '❌' };
+            const BAR_COLOR   = { 'GOOD': '#10b981', 'MODERATE': '#f59e0b', 'LOW': '#ef4444' };
+
+            const div = document.createElement('div');
+            div.id = '_efficiencyPanel';
+            div.style.cssText = 'background:white;border-radius:16px;padding:28px;margin-top:24px;box-shadow:0 2px 12px rgba(0,0,0,0.07);';
+
+            div.innerHTML = `
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px;">
+              <span style="font-size:1.5rem;">⚡</span>
+              <h2 style="color:#0f766e;font-size:1.4rem;font-weight:800;margin:0;">Plant Efficiency</h2>
+            </div>
+            <div style="border-bottom:2.5px solid #0d9488;margin-bottom:20px;"></div>
+
+            <!-- Efficiency cards grid -->
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px;margin-bottom:24px;">
+              ${efficiencies.map(e => `
+                <div style="background:#f0fdfa;border-radius:12px;padding:18px;
+                            border:1.5px solid #99f6e4;position:relative;overflow:hidden;">
+                  <div style="font-size:0.82rem;color:#0f766e;font-weight:700;margin-bottom:4px;
+                               text-transform:uppercase;letter-spacing:0.5px;">${e.label}</div>
+                  <div style="font-size:2rem;font-weight:900;color:#0d9488;line-height:1.1;">
+                    ${e.value.toFixed(1)}<span style="font-size:1rem;font-weight:600;">%</span>
+                  </div>
+                  <!-- progress bar -->
+                  <div style="background:#ccfbf1;border-radius:4px;height:8px;margin:10px 0 8px;">
+                    <div style="width:${Math.min(100,e.value)}%;height:100%;
+                                background:${BAR_COLOR[e.status]};border-radius:4px;
+                                transition:width 0.8s ease;"></div>
+                  </div>
+                  <span style="${STATUS_STYLE[e.status]}
+                    padding:3px 10px;border-radius:20px;font-size:0.75rem;font-weight:800;">
+                    ${STATUS_ICON[e.status]} ${e.status}
+                  </span>
+                </div>
+              `).join('')}
+            </div>
+
+            <!-- Efficiency table -->
+            <table style="width:100%;border-collapse:collapse;font-size:0.9rem;">
+              <thead>
+                <tr style="background:#0f766e;color:white;">
+                  <th style="padding:11px 16px;text-align:left;border-radius:6px 0 0 0;">Removal / Efficiency Parameter</th>
+                  <th style="padding:11px 16px;text-align:center;">Efficiency (%)</th>
+                  <th style="padding:11px 16px;text-align:center;">Benchmark</th>
+                  <th style="padding:11px 16px;text-align:center;border-radius:0 6px 0 0;">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${efficiencies.map((e, i) => `
+                <tr style="background:${i%2===0?'#f0fdfa':'white'};border-bottom:1px solid #f0f0f0;">
+                  <td style="padding:12px 16px;font-weight:700;color:#0f766e;">${e.label}</td>
+                  <td style="padding:12px 16px;text-align:center;font-weight:800;
+                              color:${BAR_COLOR[e.status]};font-size:1.05rem;">
+                    ${e.value.toFixed(2)}%
+                  </td>
+                  <td style="padding:12px 16px;text-align:center;color:#6b7280;">≥ 85%</td>
+                  <td style="padding:12px 16px;text-align:center;">
+                    <span style="${STATUS_STYLE[e.status]}
+                      padding:4px 12px;border-radius:20px;font-size:0.78rem;font-weight:800;">
+                      ${STATUS_ICON[e.status]} ${e.status}
+                    </span>
+                  </td>
+                </tr>`).join('')}
+              </tbody>
+            </table>
+            <p style="margin-top:10px;font-size:0.78rem;color:#6b7280;">
+              📊 Full efficiency chart saved in <strong>Plant Efficiency</strong> sheet of the exported Excel file.
+            </p>`;
+
+            document.getElementById('resultsSection').appendChild(div);
+        }
+
         function switchDay(idx) {
             for (let i = 0; i < _renderedHorizon; i++) {
                 const tab   = document.getElementById('_tab_'+i);
@@ -1901,6 +1969,7 @@
 
                 // Render table + charts
                 renderResultsTable(json.results);
+                renderEfficiency(json.efficiency || []);
                 renderMetricCharts(json.metrics.history);
 
                 document.getElementById('resultsSection').scrollIntoView({ behavior: 'smooth' });
@@ -1935,6 +2004,7 @@
                         networkDiagramImage:  imgB64,
                         startDate:            document.getElementById('startDate').value,
                         horizon:              parseInt(document.getElementById('horizon').value) || 7,
+                        efficiency:           _pred.efficiency || [],
                     })
                 });
                 if (!res.ok) throw new Error(`Server error ${res.status}`);
