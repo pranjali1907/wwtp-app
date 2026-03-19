@@ -119,6 +119,13 @@ PLANT_PARAMS = {
         'outputs': ['COD Effluent','BOD Effluent','TSS Effluent','NH3-N Effluent','Sludge Volume Index'],
         'out_units': ['mg/L','mg/L','mg/L','mg/L','mL/g'],
         'standards': [50, 10, 30, 10, 120],
+        # Plant efficiency: (parameter_label, influent_id, effluent_index, unit)
+        'efficiency': [
+            {'label':'COD Removal',  'inf_id':'cod_inf', 'eff_idx':0, 'unit':'%'},
+            {'label':'BOD Removal',  'inf_id':'bod_inf', 'eff_idx':1, 'unit':'%'},
+            {'label':'TSS Removal',  'inf_id':'tss_inf', 'eff_idx':2, 'unit':'%'},
+            {'label':'NH3-N Removal','inf_id':'nh3_inf', 'eff_idx':3, 'unit':'%'},
+        ],
     },
     'mbr': {
         'label': 'Membrane Bioreactor (MBR)',
@@ -133,6 +140,11 @@ PLANT_PARAMS = {
         'outputs': ['COD Effluent','BOD Effluent','NH3-N Effluent','TMP Trend','Fouling Rate'],
         'out_units': ['mg/L','mg/L','mg/L','kPa','kPa/d'],
         'standards': [30, 5, 5, 0.4, 0.05],
+        'efficiency': [
+            {'label':'COD Removal',  'inf_id':'cod_inf', 'eff_idx':0, 'unit':'%'},
+            {'label':'BOD Removal',  'inf_id':'bod_inf', 'eff_idx':1, 'unit':'%'},
+            {'label':'NH3-N Removal','inf_id':None,      'eff_idx':2, 'unit':'%'},  # no direct influent input
+        ],
     },
     'sbr': {
         'label': 'Sequencing Batch Reactor (SBR)',
@@ -146,30 +158,11 @@ PLANT_PARAMS = {
         'outputs': ['COD Effluent','BOD Effluent','Cycle Efficiency','Denitrification Rate'],
         'out_units': ['mg/L','mg/L','%','%'],
         'standards': [50, 10, 90, 80],
-    },
-    'mle': {
-        'label': 'Modified Ludzack-Ettinger (MLE)',
-        'inputs': [
-            {'id':'cod_inf',          'label':'COD Influent',           'unit':'mg/L','default':450,'min':100,'max':1000},
-            {'id':'tn_inf',           'label':'Total Nitrogen',         'unit':'mg/L','default':60, 'min':20, 'max':120},
-            {'id':'internal_recycle', 'label':'Internal Recycle Ratio', 'unit':'%',   'default':200,'min':100,'max':400},
-            {'id':'sludge_recycle',   'label':'Sludge Recycle Ratio',   'unit':'%',   'default':50, 'min':25, 'max':100},
+        'efficiency': [
+            {'label':'COD Removal',       'inf_id':'cod_inf', 'eff_idx':0, 'unit':'%'},
+            {'label':'Cycle Efficiency',  'inf_id':None,      'eff_idx':2, 'unit':'%'},
+            {'label':'Denitrification',   'inf_id':None,      'eff_idx':3, 'unit':'%'},
         ],
-        'outputs': ['TN Effluent','NH3-N Effluent','NO3-N Effluent','Denitrification Efficiency'],
-        'out_units': ['mg/L','mg/L','mg/L','%'],
-        'standards': [15, 5, 10, 85],
-    },
-    'bardenpho': {
-        'label': 'Bardenpho Process',
-        'inputs': [
-            {'id':'cod_inf',       'label':'COD Influent',     'unit':'mg/L',  'default':500,'min':100,'max':1200},
-            {'id':'tp_inf',        'label':'Total Phosphorus', 'unit':'mg/L',  'default':8,  'min':2,  'max':20},
-            {'id':'stages',        'label':'Anoxic Stages',    'unit':'count', 'default':2,  'min':1,  'max':3},
-            {'id':'anaerobic_hrt', 'label':'Anaerobic HRT',    'unit':'h',     'default':1.5,'min':0.5,'max':3},
-        ],
-        'outputs': ['TP Effluent','PO4-P Effluent','COD Effluent','Nitrogen Removal','Phosphorus Removal'],
-        'out_units': ['mg/L','mg/L','mg/L','%','%'],
-        'standards': [1, 0.5, 30, 90, 88],
     },
 }
 
@@ -199,20 +192,33 @@ def physics_predict(pt, p):
         ef=min(0.96,0.80+rt*0.02+do_v*0.01)
         cod=max(5,p.get('cod_inf',400)*(1-ef))
         return [round(cod,2),round(max(2,cod*0.35),2),round(min(99,82+rt*1.5+do_v*1.2),1),round(min(98,68+rt*2.5+ct*0.5),1)]
-    elif pt == 'mle':
-        ir=p.get('internal_recycle',200)/100; sr=p.get('sludge_recycle',50)/100
-        tnr=min(0.92,0.55+ir*0.10+sr*0.05)
-        tn=p.get('tn_inf',60)
-        return [round(max(2,tn*(1-tnr)),2),round(max(0.5,tn*0.4*(1-min(0.97,0.80+ir*0.04))),2),
-                round(max(1,tn*0.45*(1-min(0.88,0.60+ir*0.12))),2),round(tnr*100,1)]
-    elif pt == 'bardenpho':
-        tp=p.get('tp_inf',8); cod_i=p.get('cod_inf',500)
-        st=p.get('stages',2); hrt=p.get('anaerobic_hrt',1.5)
-        tpr=min(0.95,0.75+st*0.05+hrt*0.03); cr=min(0.97,0.90+st*0.02)
-        tp_e=max(0.1,tp*(1-tpr))
-        return [round(tp_e,3),round(tp_e*0.65,3),round(max(5,cod_i*(1-cr)),2),
-                round(min(95,80+st*3.0+hrt*2.0),1),round(tpr*100,1)]
     return []
+
+
+def compute_efficiency(pt, params, predicted):
+    """Compute plant removal efficiencies from influent params and predicted effluent values."""
+    pdata = PLANT_PARAMS.get(pt, {})
+    eff_defs = pdata.get('efficiency', [])
+    efficiencies = []
+    for e in eff_defs:
+        inf_id  = e['inf_id']
+        eff_idx = e['eff_idx']
+        pred_val = predicted[eff_idx] if eff_idx < len(predicted) else 0
+        if e['unit'] == '%' and inf_id is None:
+            # output IS efficiency directly (e.g. Cycle Efficiency, Denitrification Rate)
+            eff_pct = round(pred_val, 2)
+        elif inf_id and inf_id in params:
+            inf_val = float(params.get(inf_id, 0))
+            eff_pct = round(max(0, min(100, (inf_val - pred_val) / inf_val * 100)), 2) if inf_val > 0 else 0.0
+        else:
+            eff_pct = 0.0
+        efficiencies.append({
+            'label':  e['label'],
+            'unit':   e['unit'],
+            'value':  eff_pct,
+            'status': 'GOOD' if eff_pct >= 85 else ('MODERATE' if eff_pct >= 70 else 'LOW'),
+        })
+    return efficiencies
 
 def compute_metrics(seed):
     r2   = round(0.972 + srand(seed,1)*0.025, 4)
@@ -481,6 +487,8 @@ def predict():
             st = 'GOOD FIT' if r<=1.0 else ('UNDERFIT MODEL' if r<=1.3 else 'OVERFIT MODEL')
         rows.append({'parameter':name,'predicted':val,'unit':unit,'standard':std,'status':st})
 
+    efficiencies = compute_efficiency(pt, params, pred)
+
     matlab = gen_matlab(pt, params, nn_cfg, pred, sel_in, sel_out)
 
     return jsonify({
@@ -491,6 +499,7 @@ def predict():
         'plantType':pt,
         'predicted':pred,
         'plantLabel': pdata['label'],
+        'efficiency': efficiencies,
     })
 
 
@@ -1427,6 +1436,7 @@ def export_excel():
     nn_cfg         = d.get('nnConfig', {})
     start_date_str = d.get('startDate', datetime.now().strftime('%Y-%m-%d'))
     horizon        = int(d.get('horizon', 7))
+    efficiencies   = d.get('efficiency', [])
 
     pdata   = PLANT_PARAMS.get(pt, {})
     all_inp = pdata.get('inputs', [])
@@ -1585,6 +1595,39 @@ def export_excel():
         c.font = Font(italic=True, color='6B7280', size=9, name='Calibri')
         for ci in [4, 5]: ws1.cell(r, ci).border = BORDER
         r += 1
+
+    # ── Plant Efficiency ──
+    if efficiencies:
+        r += 1
+        ws1.merge_cells(f'A{r}:E{r}')
+        ws1[f'A{r}'].value     = '⚡  PLANT EFFICIENCY'
+        ws1[f'A{r}'].font      = Font(bold=True, color='0F766E', size=11, name='Calibri')
+        ws1[f'A{r}'].fill      = PatternFill('solid', fgColor='CCFBF1')
+        ws1[f'A{r}'].alignment = LEFT
+        ws1.row_dimensions[r].height = 22; r += 1
+
+        hdr_row(ws1, r, ['Removal / Efficiency Parameter', 'Efficiency (%)', 'Status', '', '']); r += 1
+
+        EFF_STATUS_FILL = {
+            'GOOD':     PatternFill('solid', fgColor='D1FAE5'),
+            'MODERATE': PatternFill('solid', fgColor='FEF3C7'),
+            'LOW':      PatternFill('solid', fgColor='FEE2E2'),
+        }
+        EFF_STATUS_FONT = {
+            'GOOD':     Font(bold=True, color='065F46', size=10, name='Calibri'),
+            'MODERATE': Font(bold=True, color='92400E', size=10, name='Calibri'),
+            'LOW':      Font(bold=True, color='991B1B', size=10, name='Calibri'),
+        }
+        for eff in efficiencies:
+            ws1.row_dimensions[r].height = 18
+            c = ws1.cell(r, 1, value=eff['label']); c.border = BORDER; c.font = Font(bold=True, size=10, name='Calibri'); c.alignment = LEFT
+            c = ws1.cell(r, 2, value=eff['value']); c.border = BORDER; c.alignment = CENTER
+            c.font = Font(bold=True, color='0F766E', size=10, name='Calibri'); c.number_format = '0.00"%"'
+            c = ws1.cell(r, 3, value=eff['status']); c.border = BORDER; c.alignment = CENTER
+            c.fill = EFF_STATUS_FILL.get(eff['status'], PatternFill())
+            c.font = EFF_STATUS_FONT.get(eff['status'], Font(size=10))
+            for ci in [4, 5]: ws1.cell(r, ci).border = BORDER
+            r += 1
 
     # ── Neural Network Configuration ──
     r += 1
@@ -1807,7 +1850,78 @@ def export_excel():
         ws_nd[first].alignment = CENTER
 
     # ══════════════════════════════════════════════════════════════════
-    # SHEET 5 — Data Log
+    # SHEET 5 — Plant Efficiency
+    # ══════════════════════════════════════════════════════════════════
+    ws_eff = wb.create_sheet('Plant Efficiency')
+    ws_eff.column_dimensions['A'].width = 36
+    ws_eff.column_dimensions['B'].width = 22
+    ws_eff.column_dimensions['C'].width = 22
+    ws_eff.column_dimensions['D'].width = 22
+    ws_eff.column_dimensions['E'].width = 22
+
+    ws_eff.merge_cells('A1:E1')
+    title_cell(ws_eff, 'A1', f'Plant Efficiency Report — {pdata.get("label", pt.upper())}', fg='0F172A')
+    ws_eff.row_dimensions[1].height = 32
+
+    ws_eff.merge_cells('A2:E2')
+    ws_eff['A2'].value     = f'Plant: {pdata.get("label", pt.upper())}   |   Date: {now_str}   |   Network: {nn_cfg.get("networkType","feedforward").upper()}'
+    ws_eff['A2'].font      = Font(italic=True, color='6B7280', size=9, name='Calibri')
+    ws_eff['A2'].fill      = PatternFill('solid', fgColor='F1F5F9')
+    ws_eff['A2'].alignment = CENTER
+
+    # Section header
+    ws_eff.merge_cells('A4:E4')
+    ws_eff['A4'].value     = '⚡  REMOVAL EFFICIENCY SUMMARY'
+    ws_eff['A4'].font      = Font(bold=True, color='0F766E', size=11, name='Calibri')
+    ws_eff['A4'].fill      = PatternFill('solid', fgColor='CCFBF1')
+    ws_eff['A4'].alignment = LEFT
+    ws_eff.row_dimensions[4].height = 22
+
+    hdr_row(ws_eff, 5, ['Removal / Efficiency Parameter', 'Efficiency (%)', 'Status', 'Benchmark (Good ≥)', 'Interpretation'])
+
+    EFF_FILL = {
+        'GOOD':     PatternFill('solid', fgColor='D1FAE5'),
+        'MODERATE': PatternFill('solid', fgColor='FEF3C7'),
+        'LOW':      PatternFill('solid', fgColor='FEE2E2'),
+    }
+    EFF_FONT = {
+        'GOOD':     Font(bold=True, color='065F46', size=10, name='Calibri'),
+        'MODERATE': Font(bold=True, color='92400E', size=10, name='Calibri'),
+        'LOW':      Font(bold=True, color='991B1B', size=10, name='Calibri'),
+    }
+    EFF_INTERP = {
+        'GOOD':     'Excellent removal — plant performing well',
+        'MODERATE': 'Acceptable — consider process optimisation',
+        'LOW':      'Below target — review operating conditions',
+    }
+
+    if efficiencies:
+        for i, eff in enumerate(efficiencies, 6):
+            ws_eff.row_dimensions[i].height = 20
+            c = ws_eff.cell(i, 1, value=eff['label']); c.border = BORDER; c.font = Font(bold=True, size=10, name='Calibri'); c.alignment = LEFT
+            c = ws_eff.cell(i, 2, value=eff['value']); c.border = BORDER; c.alignment = CENTER
+            c.font = Font(bold=True, color='0F766E', size=11, name='Calibri'); c.number_format = '0.00"%"'
+            c = ws_eff.cell(i, 3, value=eff['status']); c.border = BORDER; c.alignment = CENTER
+            c.fill = EFF_FILL.get(eff['status'], PatternFill())
+            c.font = EFF_FONT.get(eff['status'], Font(size=10))
+            c = ws_eff.cell(i, 4, value='85%'); c.border = BORDER; c.alignment = CENTER; c.font = Font(size=10, name='Calibri')
+            c = ws_eff.cell(i, 5, value=EFF_INTERP.get(eff['status'], '')); c.border = BORDER
+            c.font = Font(italic=True, color='6B7280', size=9, name='Calibri')
+
+        # Efficiency bar chart
+        last_eff_r = 5 + len(efficiencies)
+        bc_eff = BarChart(); bc_eff.title = 'Plant Removal Efficiency (%)'; bc_eff.style = 10; bc_eff.type = 'col'
+        bc_eff.y_axis.title = 'Efficiency (%)'; bc_eff.x_axis.title = 'Parameter'
+        bc_eff.width = 28; bc_eff.height = 16
+        bc_eff.y_axis.scaling.min = 0; bc_eff.y_axis.scaling.max = 100
+        d_eff = Ref(ws_eff, min_col=2, min_row=5, max_row=last_eff_r)
+        bc_eff.add_data(d_eff, titles_from_data=True)
+        bc_eff.series[0].graphicalProperties.solidFill = '0D9488'
+        bc_eff.set_categories(Ref(ws_eff, min_col=1, min_row=6, max_row=last_eff_r))
+        ws_eff.add_chart(bc_eff, 'G4')
+
+    # ══════════════════════════════════════════════════════════════════
+    # SHEET 6 — Data Log
     # ══════════════════════════════════════════════════════════════════
     ws_log = wb.create_sheet('Data Log')
     ws_log.column_dimensions['A'].width = 30
